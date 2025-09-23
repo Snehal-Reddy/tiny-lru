@@ -9,6 +9,14 @@ repository = "https://github.com/yourusername/tiny-lru"
 keywords = ["lru", "cache", "performance", "embedded", "hft"]
 categories = ["data-structures", "caching"]
 
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+tinyvec = "1"
+hashbrown = { version = "0.14", default-features = true }
+
 [dev-dependencies]
 criterion = "0.5"
 
