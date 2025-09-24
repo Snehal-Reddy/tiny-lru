@@ -14,7 +14,7 @@ default = ["std"]
 std = []
 
 [dependencies]
-tinyvec = "1"
+tinyvec = { version = "1", features = ["alloc"] }
 hashbrown = { version = "0.14", default-features = true }
 
 [dev-dependencies]
