@@ -13,7 +13,7 @@ use tinyvec::TinyVec;
 const MAX_CAPACITY: u16 = u16::MAX - 1;
 
 /// Intrusive node stored in the TinyVec/heap storage.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Entry<K, V> 
 where
     K: Default,
@@ -26,6 +26,7 @@ where
 }
 
 /// LRU cache with inline-then-spill storage.
+#[derive(Clone)]
 pub struct TinyLru<K, V, const N: usize>
 where
     K: Eq + Hash + Default,
