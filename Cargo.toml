@@ -19,7 +19,31 @@ hashbrown = { version = "0.14", default-features = true }
 
 [dev-dependencies]
 criterion = "0.5"
+lru = { path = "./lru-rs" }
+const-lru = { path = "./const-lru" }
+schnellru = { path = "./schnellru" }
+uluru = { path = "./uluru" }
 
 [[bench]]
 name = "benchmarks"
+harness = false
+
+[[bench]]
+name = "tiny_lru_bench"
+harness = false
+
+[[bench]]
+name = "lru_rs_bench"
+harness = false
+
+[[bench]]
+name = "const_lru_bench"
+harness = false
+
+[[bench]]
+name = "schnellru_bench"
+harness = false
+
+[[bench]]
+name = "uluru_bench"
 harness = false
