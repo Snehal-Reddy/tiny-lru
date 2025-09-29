@@ -111,24 +111,24 @@ where
         }
 
         // Key doesn't exist - need to insert new entry
-        if self.size < N as u16 {
-            // If inserting new key and size < N: store inline (no allocations)
-            self.insert_inline(key, value);
-        } else if self.size == N as u16 && self.capacity > N as u16 {
-            // If inserting new key and size == N and capacity > N: spill all entries to heap, then insert
-            todo!("spill: allocate HashMap index and migrate to heap storage, then insert new entry");
-        } else if self.size == self.capacity {
-            // If inserting new key and size == capacity: evict LRU first, then insert
+        if self.size < self.capacity {
+            // Cache has space - insert directly
+            if self.size < N as u16 {
+                // Pre-spill: store inline (no allocations)
+                self.insert_inline(key, value);
+            } else {
+                // Post-spill: use heap storage
+                todo!("spill: insert new entry in heap mode");
+            }
+        } else {
+            // Cache is full - evict LRU first, then insert
             if self.is_spill {
                 todo!("spill: evict LRU entry and insert new entry in heap mode");
             } else {
-                // Pre-spill: pop LRU, then insert new entry
+                // Pre-spill: evict LRU, then insert new entry
                 self.pop(); // Remove LRU entry
                 self.insert_inline(key, value); // Insert new entry
             }
-        } else {
-            // This shouldn't happen given our invariants, but handle gracefully
-            unreachable!("invalid state: size={}, N={}, capacity={}", self.size, N, self.capacity);
         }
     }
 
@@ -188,13 +188,11 @@ where
         }
 
         if let Some(index) = self.find_key_index(key) {
-            // Promote to MRU on hit
             self.promote_to_mru(index);
-            // Return immutable reference
-            return Some(&self.store[index].val);
+            Some(&self.store[index].val)
+        } else {
+            None
         }
-
-        None
     }
 
     /// Get mutable by key, promoting to MRU on hit.
@@ -204,23 +202,16 @@ where
         }
 
         if let Some(index) = self.find_key_index(key) {
-            // Promote to MRU on hit
             self.promote_to_mru(index);
-            // Return mutable reference
-            return Some(&mut self.store[index].val);
+            Some(&mut self.store[index].val)
+        } else {
+            None
         }
-
-        None
     }
 
     /// Peek without promotion.
     pub fn peek(&self, key: &K) -> Option<&V> {
-        // Use find_key_index for consistent lookup logic
-        if let Some(index) = self.find_key_index(key) {
-            Some(&self.store[index].val)
-        } else {
-            None
-        }
+        self.find_key_index(key).map(|index| &self.store[index].val)
     }
 
     /// Remove by key and return owned pair.
@@ -354,7 +345,7 @@ where
         self.store.push(new_entry);
 
         // Update linked list
-        if self.is_empty() {
+        if self.size == 0 {
             // First entry - set as both head and tail
             self.head = new_index as u16;
             self.tail = new_index as u16;
@@ -370,8 +361,8 @@ where
 
     /// Promote an entry to MRU (move to tail).
     fn promote_to_mru(&mut self, index: usize) {
+        // Early return if already MRU or only one element
         if self.size <= 1 || index == self.tail as usize {
-            // Already MRU or only one element
             return;
         }
 
