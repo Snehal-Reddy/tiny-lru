@@ -1,59 +1,51 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+#![feature(portable_simd)]
 
 //! tiny-lru: A Fast Small-then-Spill LRU cache.
-//!
-//! This is scaffolding only. All functions are intentionally unimplemented.
 
 extern crate alloc;
 
 use core::hash::Hash;
 use tinyvec::TinyVec;
 
+/// Helper function to get hash for any Hash type using foldhash
+/// TODO: Maybe use passthrough hash for simpler types?
+pub fn get_key_hash<K: Hash>(key: &K) -> u64 {
+    use foldhash::fast::FixedState;
+    use core::hash::{BuildHasher, Hasher};
+    let mut hasher = FixedState::with_seed(0).build_hasher();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Maximum capacity for v1 implementation (u16::MAX - 1)
 const MAX_CAPACITY: u16 = u16::MAX - 1;
 
-/// Intrusive node stored in the TinyVec/heap storage.
-#[derive(Default, Clone)]
-pub struct Entry<K, V> 
-where
-    K: Default,
-    V: Default,
-{
-    pub key: K,
-    pub val: V,
-    pub next: u16,
-    pub prev: u16,
-}
-
-/// LRU cache with inline-then-spill storage.
+/// LRU cache with inline-then-spill storage using Struct of Arrays (SoA) layout.
+/// 
+/// SoA layout enables SIMD-optimized hash-based lookups and better cache utilization
+/// during key searches by storing related data in separate arrays.
 #[derive(Clone)]
 pub struct TinyLru<K, V, const N: usize>
 where
     K: Eq + Hash + Default,
     V: Default,
 {
-    // Unified node storage; starts inline, spills to heap as capacity grows.
-    // Compact: no holes; deletions swap the last element into the freed index.
-    store: TinyVec<[Entry<K, V>; N]>,
-
-    // Current number of live items.
-    size: u16,
-
-    // LRU linkage heads (indices into `store`)
-    head: u16, // LRU index; sentinel if empty
-    tail: u16, // MRU index; sentinel if empty
-
-    // Key → index map. Lazily allocated ONLY on first spill to avoid heap allocs pre-spill.
-    // Pre-spill lookups use linear scan over the compact TinyVec.
-    index: Option<hashbrown::HashMap<K, u16>>,
-
-    // Capacity semantics (v1 cap):
-    // - size and capacity are u16; maximum capacity <= 65,534 (u16::MAX - 1)
-    // - set_capacity requires new_cap > size and new_cap >= N
-    capacity: u16,
-
-    // Mode flag (informational): true once first heap allocation occurs; unspill is explicit
-    is_spill: bool,
+    // Separate arrays for each component - enables SIMD optimization
+    // CRITICAL: All arrays remain COMPACT with no holes, using swap-remove for deletions
+    hashes: TinyVec<[u64; N]>,        // Pre-computed hashes for SIMD comparison
+    keys: TinyVec<[K; N]>,            // Actual keys (accessed only on hash collision)
+    values: TinyVec<[V; N]>,          // Values
+    next: TinyVec<[u16; N]>,          // DLL next pointers
+    prev: TinyVec<[u16; N]>,          // DLL prev pointers
+    
+    // Metadata (unchanged from AoS)
+    size: u16,                        // Current number of live items
+    head: u16,                        // LRU index; sentinel if empty
+    tail: u16,                        // MRU index; sentinel if empty
+    capacity: u16,                    // Total capacity (≤ 65,534)
+    is_spill: bool,                   // Informational spill flag
+    index: Option<hashbrown::HashMap<K, u16>>, // Lazily allocated on first spill
 }
 
 // Compile-time assertion: N must be <= MAX_CAPACITY
@@ -71,13 +63,17 @@ where
         assert_capacity_limit::<N>();
         
         Self {
-            store: TinyVec::new(),
+            hashes: TinyVec::new(),
+            keys: TinyVec::new(),
+            values: TinyVec::new(),
+            next: TinyVec::new(),
+            prev: TinyVec::new(),
             size: 0,
             head: u16::MAX, // Sentinel value for empty list
             tail: u16::MAX, // Sentinel value for empty list
-            index: None,    // No HashMap allocated pre-spill
             capacity: N as u16,
             is_spill: false,
+            index: None,    // No HashMap allocated pre-spill
         }
     }
 
@@ -89,13 +85,17 @@ where
         assert!(cap >= N as u16, "capacity must be >= N");
         
         Self {
-            store: TinyVec::new(),
+            hashes: TinyVec::new(),
+            keys: TinyVec::new(),
+            values: TinyVec::new(),
+            next: TinyVec::new(),
+            prev: TinyVec::new(),
             size: 0,
             head: u16::MAX, // Sentinel value for empty list
             tail: u16::MAX, // Sentinel value for empty list
-            index: None,    // No HashMap allocated pre-spill
             capacity: cap,
             is_spill: false,
+            index: None,    // No HashMap allocated pre-spill
         }
     }
 
@@ -103,8 +103,9 @@ where
     pub fn push(&mut self, key: K, value: V) {
         // If key exists: update value and promote to MRU
         if let Some(index) = self.find_key_index(&key) {
-            // Update the value
-            self.store[index].val = value;
+            // Update the value and hash
+            self.values[index] = value;
+            self.hashes[index] = get_key_hash(&key);
             // Promote to MRU (move to tail)
             self.promote_to_mru(index);
             return;
@@ -145,12 +146,15 @@ where
         // Get the LRU index (head)
         let lru_index = self.head as usize;
         // Capture next before swap_remove
-        let next_index_before = self.store[lru_index].next;
+        let next_index_before = self.next[lru_index];
         let last_index_before = (self.size - 1) as usize;
         
         // Extract the key-value pair before removal
-        let entry = self.store.swap_remove(lru_index);
-        let (key, value) = (entry.key, entry.val);
+        let key = self.keys.swap_remove(lru_index);
+        let value = self.values.swap_remove(lru_index);
+        let _hash = self.hashes.swap_remove(lru_index);
+        let _next = self.next.swap_remove(lru_index);
+        let _prev = self.prev.swap_remove(lru_index);
         
         // Update size
         self.size -= 1;
@@ -169,7 +173,7 @@ where
                 self.head = next_index_before;
             }
             if self.head != u16::MAX {
-                self.store[self.head as usize].prev = u16::MAX;
+                self.prev[self.head as usize] = u16::MAX;
             }
             
             // If we swapped with the last element, update its index in the DLL
@@ -189,7 +193,7 @@ where
 
         if let Some(index) = self.find_key_index(key) {
             self.promote_to_mru(index);
-            Some(&self.store[index].val)
+            Some(&self.values[index])
         } else {
             None
         }
@@ -203,7 +207,7 @@ where
 
         if let Some(index) = self.find_key_index(key) {
             self.promote_to_mru(index);
-            Some(&mut self.store[index].val)
+            Some(&mut self.values[index])
         } else {
             None
         }
@@ -211,7 +215,7 @@ where
 
     /// Peek without promotion.
     pub fn peek(&self, key: &K) -> Option<&V> {
-        self.find_key_index(key).map(|index| &self.store[index].val)
+        self.find_key_index(key).map(|index| &self.values[index])
     }
 
     /// Remove by key and return owned pair.
@@ -224,11 +228,14 @@ where
         let index = self.find_key_index(key)?;
         
         let last_index_before = (self.size - 1) as usize;
-        let removed_prev = self.store[index].prev;
-        let removed_next = self.store[index].next;
+        let removed_prev = self.prev[index];
+        let removed_next = self.next[index];
         // Extract the key-value pair before removal
-        let entry = self.store.swap_remove(index);
-        let (key, value) = (entry.key, entry.val);
+        let key = self.keys.swap_remove(index);
+        let value = self.values.swap_remove(index);
+        let _hash = self.hashes.swap_remove(index);
+        let _next = self.next.swap_remove(index);
+        let _prev = self.prev.swap_remove(index);
         
         // Update size
         self.size -= 1;
@@ -260,8 +267,12 @@ where
 
     /// Clear all entries.
     pub fn clear(&mut self) {
-        // Clear the store efficiently
-        self.store.clear();
+        // Clear all arrays efficiently
+        self.hashes.clear();
+        self.keys.clear();
+        self.values.clear();
+        self.next.clear();
+        self.prev.clear();
         
         // Reset state to empty
         self.size = 0;
@@ -308,9 +319,14 @@ where
         self.find_key_index(key).is_some()
     }
 
+    /// Whether the cache has spilled to heap storage.
+    pub fn is_spill(&self) -> bool {
+        self.is_spill
+    }
+
 
     /// Find the index of a key.
-    /// - Pre-spill: linear scan over compact TinyVec
+    /// - Pre-spill: SIMD-optimized hash-based scan over compact TinyVec
     /// - Post-spill: todo!() to use hashmap index for O(1)
     /// Returns None if key not found.
     fn find_key_index(&self, key: &K) -> Option<usize> {
@@ -318,31 +334,87 @@ where
             // Post-spill: look up via hashmap index
             todo!("post-spill find_key_index: use hashmap index for O(1) lookup")
         } else {
-            // Pre-spill: use linear scan over compact TinyVec
-            // TODO: Try SIMD?
-            for (i, entry) in self.store.iter().enumerate() {
-                if entry.key == *key {
+            // Pre-spill: SIMD-optimized hash-based scan over compact TinyVec
+            let target_hash = get_key_hash(key);
+            self.find_key_index_simd(key, target_hash)
+        }
+    }
+
+    /// SIMD-optimized hash comparison for find_key_index
+    fn find_key_index_simd(&self, key: &K, target_hash: u64) -> Option<usize> {
+        use std::simd::{Simd, Mask, cmp::SimdPartialEq};
+        
+        // Use u64x4 for 4-way parallel hash comparison
+        const LANES: usize = 4;
+        let len = self.hashes.len();
+        
+        if len == 0 {
+            return None;
+        }
+        
+        // For very small arrays, use scalar comparison to avoid SIMD overhead
+        if len < LANES {
+            for i in 0..len {
+                if self.hashes[i] == target_hash && self.keys[i] == *key {
                     return Some(i);
                 }
             }
-            None
+            return None;
         }
+        
+        // Create SIMD vector with target hash repeated
+        let target_simd = Simd::splat(target_hash);
+        
+        // Process chunks of 4 hashes at a time
+        let mut i = 0;
+        while i + LANES <= len {
+            // Load chunk of hashes into SIMD vector
+            let chunk = &self.hashes[i..i + LANES];
+            let hashes_simd = Simd::from_slice(chunk);
+            
+            // Compare hashes in parallel
+            let mask: Mask<i64, LANES> = hashes_simd.simd_eq(target_simd);
+            
+            // Check if any hashes match
+            if mask.any() {
+                // Check each lane for hash matches
+                for lane in 0..LANES {
+                    if mask.test(lane) {
+                        let idx = i + lane;
+                        // Hash match - verify with actual key comparison
+                        if self.keys[idx] == *key {
+                            return Some(idx);
+                        }
+                    }
+                }
+            }
+            
+            i += LANES;
+        }
+        
+        // Handle remaining elements with scalar comparison
+        for j in i..len {
+            if self.hashes[j] == target_hash && self.keys[j] == *key {
+                return Some(j);
+            }
+        }
+        
+        None
     }
 
     /// Insert a new entry inline (pre-spill only).
     fn insert_inline(&mut self, key: K, value: V) {
         let new_index = self.size as usize;
         
-        // Create new entry
-        let new_entry = Entry {
-            key,
-            val: value,
-            next: u16::MAX, // Will be set to current tail
-            prev: self.tail, // Previous MRU
-        };
+        // Pre-compute hash for fast lookups
+        let hash = get_key_hash(&key);
 
-        // Add to store
-        self.store.push(new_entry);
+        // Add to all arrays
+        self.hashes.push(hash);
+        self.keys.push(key);
+        self.values.push(value);
+        self.next.push(u16::MAX); // Will be set to current tail
+        self.prev.push(self.tail); // Previous MRU
 
         // Update linked list
         if self.size == 0 {
@@ -351,7 +423,7 @@ where
             self.tail = new_index as u16;
         } else {
             // Link to previous tail
-            self.store[self.tail as usize].next = new_index as u16;
+            self.next[self.tail as usize] = new_index as u16;
             self.tail = new_index as u16;
         }
 
@@ -368,32 +440,32 @@ where
 
         let entry_index = index as u16;
         // Copy links first to avoid holding immutable borrows during mutation
-        let prev = self.store[index].prev;
-        let next = self.store[index].next;
+        let prev = self.prev[index];
+        let next = self.next[index];
 
         // Remove from current position
         if entry_index == self.head {
             // Moving head - update head to next
             self.head = next;
             if self.head != u16::MAX {
-                self.store[self.head as usize].prev = u16::MAX;
+                self.prev[self.head as usize] = u16::MAX;
             }
         } else {
             // Update previous entry's next pointer
-            self.store[prev as usize].next = next;
+            self.next[prev as usize] = next;
         }
 
         // Update next entry's prev pointer
         if next != u16::MAX {
-            self.store[next as usize].prev = prev;
+            self.prev[next as usize] = prev;
         }
 
         // Move to tail
-        self.store[index].prev = self.tail;
-        self.store[index].next = u16::MAX;
+        self.prev[index] = self.tail;
+        self.next[index] = u16::MAX;
         
         // Update previous tail's next pointer
-        self.store[self.tail as usize].next = entry_index;
+        self.next[self.tail as usize] = entry_index;
         
         // Update tail
         self.tail = entry_index;
@@ -403,7 +475,7 @@ where
     fn remove_from_dll(&mut self, _index: usize, prev: u16, next: u16) {
         // Update previous node's next pointer
         if prev != u16::MAX {
-            self.store[prev as usize].next = next;
+            self.next[prev as usize] = next;
         } else {
             // This was the head - update head
             self.head = next;
@@ -411,7 +483,7 @@ where
         
         // Update next node's prev pointer
         if next != u16::MAX {
-            self.store[next as usize].prev = prev;
+            self.prev[next as usize] = prev;
         } else {
             // This was the tail - update tail
             self.tail = prev;
@@ -423,19 +495,19 @@ where
         let new_index = old_index;
         
         // Copy the prev/next values to avoid borrow conflicts
-        let prev = self.store[new_index].prev;
-        let next = self.store[new_index].next;
+        let prev = self.prev[new_index];
+        let next = self.next[new_index];
         
         // Update references to this element
         if prev != u16::MAX {
-            self.store[prev as usize].next = new_index as u16;
+            self.next[prev as usize] = new_index as u16;
         } else {
             // This is now the head
             self.head = new_index as u16;
         }
         
         if next != u16::MAX {
-            self.store[next as usize].prev = new_index as u16;
+            self.prev[next as usize] = new_index as u16;
         } else {
             // This is now the tail
             self.tail = new_index as u16;

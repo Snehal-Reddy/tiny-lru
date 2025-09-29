@@ -16,6 +16,7 @@ std = []
 [dependencies]
 tinyvec = { version = "1", features = ["alloc"] }
 hashbrown = { version = "0.14", default-features = true }
+foldhash = "0.2"
 
 [dev-dependencies]
 criterion = "0.5"

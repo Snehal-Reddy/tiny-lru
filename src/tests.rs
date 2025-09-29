@@ -23,10 +23,10 @@ fn verify_dll_structure<K: Eq + Hash + Default, V: Default, const N: usize>(cach
     assert!(cache.tail < cache.size);
     
     // Verify head has no previous element
-    assert_eq!(cache.store[cache.head as usize].prev, u16::MAX);
+    assert_eq!(cache.prev[cache.head as usize], u16::MAX);
     
     // Verify tail has no next element
-    assert_eq!(cache.store[cache.tail as usize].next, u16::MAX);
+    assert_eq!(cache.next[cache.tail as usize], u16::MAX);
     
     // Verify DLL chain integrity
     let mut current = cache.head;
@@ -34,19 +34,19 @@ fn verify_dll_structure<K: Eq + Hash + Default, V: Default, const N: usize>(cach
     
     while current != u16::MAX {
         count += 1;
-        let entry = &cache.store[current as usize];
+        let current_idx = current as usize;
         
         // Verify next->prev points back to current
-        if entry.next != u16::MAX {
-            assert_eq!(cache.store[entry.next as usize].prev, current);
+        if cache.next[current_idx] != u16::MAX {
+            assert_eq!(cache.prev[cache.next[current_idx] as usize], current);
         }
         
         // Verify prev->next points forward to current
-        if entry.prev != u16::MAX {
-            assert_eq!(cache.store[entry.prev as usize].next, current);
+        if cache.prev[current_idx] != u16::MAX {
+            assert_eq!(cache.next[cache.prev[current_idx] as usize], current);
         }
         
-        current = entry.next;
+        current = cache.next[current_idx];
     }
     
     // Verify we visited all elements
@@ -59,7 +59,7 @@ fn test_new() {
     assert_eq!(cache.len(), 0);
     assert!(cache.is_empty());
     assert_eq!(cache.capacity(), 4);
-    assert!(!cache.is_spill);
+    assert!(!cache.is_spill());
     verify_dll_structure(&cache);
 }
 
@@ -69,7 +69,7 @@ fn test_with_capacity() {
     assert_eq!(cache.len(), 0);
     assert!(cache.is_empty());
     assert_eq!(cache.capacity(), 8);
-    assert!(!cache.is_spill);
+    assert!(!cache.is_spill());
     verify_dll_structure(&cache);
 }
 
@@ -87,7 +87,7 @@ fn test_push_single() {
     assert_eq!(cache.len(), 1);
     assert!(!cache.is_empty());
     assert_eq!(cache.capacity(), 4);
-    assert!(!cache.is_spill);
+    assert!(!cache.is_spill());
     verify_dll_structure(&cache);
 }
 
@@ -97,7 +97,7 @@ fn test_push_multiple() {
     
     assert_eq!(cache.len(), 3);
     assert!(!cache.is_empty());
-    assert!(!cache.is_spill);
+    assert!(!cache.is_spill());
     verify_dll_structure(&cache);
 }
 
@@ -274,7 +274,7 @@ fn test_clear() {
     assert_eq!(cache.len(), 0);
     assert!(cache.is_empty());
     assert_eq!(cache.capacity(), 4); // Capacity should remain unchanged
-    assert!(!cache.is_spill);
+    assert!(!cache.is_spill());
     
     verify_dll_structure(&cache);
 }
@@ -497,6 +497,53 @@ fn test_different_value_types() {
     }
     
     assert_eq!(cache.get(&"vec1"), Some(&vec![1, 2, 3, 4]));
+    
+    verify_dll_structure(&cache);
+}
+
+#[test]
+fn test_custom_key_types() {
+    #[derive(Default, Clone, PartialEq, Eq, Hash)]
+    struct CustomKey {
+        id: u32,
+        name: String,
+    }
+    
+    let mut cache: TinyLru<CustomKey, i32, 4> = TinyLru::new();
+    
+    let key1 = CustomKey {
+        id: 1,
+        name: "test".to_string(),
+    };
+    
+    let key2 = CustomKey {
+        id: 2,
+        name: "example".to_string(),
+    };
+    
+    cache.push(key1.clone(), 42);
+    cache.push(key2.clone(), 100);
+    
+    assert_eq!(cache.get(&key1), Some(&42));
+    assert_eq!(cache.get(&key2), Some(&100));
+    assert_eq!(cache.len(), 2);
+    
+    verify_dll_structure(&cache);
+}
+
+#[test]
+fn test_vec_as_key() {
+    let mut cache: TinyLru<Vec<u8>, i32, 4> = TinyLru::new();
+    
+    let key1 = vec![1, 2, 3];
+    let key2 = vec![4, 5, 6];
+    
+    cache.push(key1.clone(), 100);
+    cache.push(key2.clone(), 200);
+    
+    assert_eq!(cache.get(&key1), Some(&100));
+    assert_eq!(cache.get(&key2), Some(&200));
+    assert_eq!(cache.len(), 2);
     
     verify_dll_structure(&cache);
 }
