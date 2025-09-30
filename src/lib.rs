@@ -210,6 +210,7 @@ where
     }
 
     /// Peek without promotion.
+    #[inline(always)]
     pub fn peek(&self, key: &K) -> Option<&V> {
         self.find_key_index(key).map(|index| &self.store[index].val)
     }
@@ -304,6 +305,7 @@ where
     }
 
     /// Contains key.
+    #[inline(always)]
     pub fn contains_key(&self, key: &K) -> bool {
         self.find_key_index(key).is_some()
     }
@@ -313,14 +315,17 @@ where
     /// - Pre-spill: linear scan over compact TinyVec
     /// - Post-spill: todo!() to use hashmap index for O(1)
     /// Returns None if key not found.
+    #[inline(always)]
     fn find_key_index(&self, key: &K) -> Option<usize> {
         if self.is_spill {
             // Post-spill: look up via hashmap index
             todo!("post-spill find_key_index: use hashmap index for O(1) lookup")
         } else {
-            // Pre-spill: use linear scan over compact TinyVec
-            // TODO: Try SIMD?
-            for (i, entry) in self.store.iter().enumerate() {
+            // Pre-spill: use raw slice iteration
+            let entries = &self.store[..self.size as usize];
+            for i in 0..entries.len() {
+                // Use unsafe to avoid bounds checks in the hot path
+                let entry = unsafe { entries.get_unchecked(i) };
                 if entry.key == *key {
                     return Some(i);
                 }
