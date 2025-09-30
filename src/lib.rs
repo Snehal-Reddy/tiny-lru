@@ -182,6 +182,7 @@ where
     }
 
     /// Get by key, promoting to MRU on hit.
+    #[inline(always)]
     pub fn get(&mut self, key: &K) -> Option<&V> {
         if self.is_spill {
             todo!("post-spill get: use hashmap index and promote to MRU")
@@ -196,6 +197,7 @@ where
     }
 
     /// Get mutable by key, promoting to MRU on hit.
+    #[inline(always)]
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         if self.is_spill {
             todo!("post-spill get_mut: use hashmap index and promote to MRU")
@@ -365,42 +367,47 @@ where
     }
 
     /// Promote an entry to MRU (move to tail).
+    #[inline(always)]
     fn promote_to_mru(&mut self, index: usize) {
         // Early return if already MRU or only one element
         if self.size <= 1 || index == self.tail as usize {
             return;
         }
 
+        // SAFETY: `index` comes from `find_key_index`, so 0 <= index < self.size.
+        // We use unchecked access to eliminate bounds checks on the hot path.
+        let entries: *mut [Entry<K, V>] = self.store.as_mut_slice();
+        let entry = unsafe { (&mut *entries).get_unchecked_mut(index) };
+        let prev = entry.prev;
+        let next = entry.next;
         let entry_index = index as u16;
-        // Copy links first to avoid holding immutable borrows during mutation
-        let prev = self.store[index].prev;
-        let next = self.store[index].next;
 
-        // Remove from current position
+        // Detach from current position
         if entry_index == self.head {
-            // Moving head - update head to next
+            // Moving head to somewhere later: head becomes next
             self.head = next;
             if self.head != u16::MAX {
-                self.store[self.head as usize].prev = u16::MAX;
+                let head_idx = self.head as usize;
+                unsafe { (&mut *entries).get_unchecked_mut(head_idx) }.prev = u16::MAX;
             }
         } else {
-            // Update previous entry's next pointer
-            self.store[prev as usize].next = next;
+            // Update previous node's next to skip this entry
+            let prev_idx = prev as usize;
+            unsafe { (&mut *entries).get_unchecked_mut(prev_idx) }.next = next;
         }
 
-        // Update next entry's prev pointer
+        // Update next node's prev to skip this entry (if it exists)
         if next != u16::MAX {
-            self.store[next as usize].prev = prev;
+            let next_idx = next as usize;
+            unsafe { (&mut *entries).get_unchecked_mut(next_idx) }.prev = prev;
         }
 
-        // Move to tail
-        self.store[index].prev = self.tail;
-        self.store[index].next = u16::MAX;
-        
-        // Update previous tail's next pointer
-        self.store[self.tail as usize].next = entry_index;
-        
-        // Update tail
+        // Attach at tail
+        let old_tail = self.tail;
+        entry.prev = old_tail;
+        entry.next = u16::MAX;
+        let old_tail_idx = old_tail as usize;
+        unsafe { (&mut *entries).get_unchecked_mut(old_tail_idx) }.next = entry_index;
         self.tail = entry_index;
     }
 
