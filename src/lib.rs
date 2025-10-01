@@ -326,7 +326,9 @@ where
             // Pre-spill: use raw slice iteration
             let entries = &self.store[..self.size as usize];
             for i in 0..entries.len() {
-                // Use unsafe to avoid bounds checks in the hot path
+                // SAFETY: We iterate over `0..entries.len()` where `entries` is a slice of length
+                // `self.size as usize`. Since `i` is guaranteed to be in bounds of this slice,
+                // `get_unchecked(i)` is safe. This avoids bounds checks in the hot path.
                 let entry = unsafe { entries.get_unchecked(i) };
                 if entry.key == *key {
                     return Some(i);
@@ -377,6 +379,9 @@ where
         // SAFETY: `index` comes from `find_key_index`, so 0 <= index < self.size.
         // We use unchecked access to eliminate bounds checks on the hot path.
         let entries: *mut [Entry<K, V>] = self.store.as_mut_slice();
+        // SAFETY: `index` is guaranteed to be in bounds (0 <= index < self.size) since it
+        // comes from `find_key_index`. The raw pointer dereference is safe because `entries`
+        // is derived from `self.store.as_mut_slice()` which is a valid mutable slice.
         let entry = unsafe { (&mut *entries).get_unchecked_mut(index) };
         let prev = entry.prev;
         let next = entry.next;
@@ -388,17 +393,27 @@ where
             self.head = next;
             if self.head != u16::MAX {
                 let head_idx = self.head as usize;
+                // SAFETY: `head_idx` is derived from `self.head` which is a valid index into
+                // the store (either u16::MAX sentinel or a valid index < self.size). Since we
+                // just set `self.head = next` and `next` comes from a valid entry, `head_idx`
+                // is guaranteed to be in bounds. The raw pointer dereference is safe as above.
                 unsafe { (&mut *entries).get_unchecked_mut(head_idx) }.prev = u16::MAX;
             }
         } else {
             // Update previous node's next to skip this entry
             let prev_idx = prev as usize;
+            // SAFETY: `prev_idx` is derived from `prev` which comes from a valid entry's `prev`
+            // field. Since we're not at the head (else branch), `prev` must be a valid index
+            // < self.size. The raw pointer dereference is safe as above.
             unsafe { (&mut *entries).get_unchecked_mut(prev_idx) }.next = next;
         }
 
         // Update next node's prev to skip this entry (if it exists)
         if next != u16::MAX {
             let next_idx = next as usize;
+            // SAFETY: `next_idx` is derived from `next` which comes from a valid entry's `next`
+            // field. Since `next != u16::MAX`, it must be a valid index < self.size. The raw
+            // pointer dereference is safe as above.
             unsafe { (&mut *entries).get_unchecked_mut(next_idx) }.prev = prev;
         }
 
@@ -407,6 +422,9 @@ where
         entry.prev = old_tail;
         entry.next = u16::MAX;
         let old_tail_idx = old_tail as usize;
+        // SAFETY: `old_tail_idx` is derived from `self.tail` which is guaranteed to be a valid
+        // index < self.size (not u16::MAX) since we're in the promote_to_mru function and there
+        // are at least 2 elements (early return check). The raw pointer dereference is safe as above.
         unsafe { (&mut *entries).get_unchecked_mut(old_tail_idx) }.next = entry_index;
         self.tail = entry_index;
     }
