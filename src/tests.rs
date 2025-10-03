@@ -11,7 +11,7 @@ fn create_test_cache() -> TinyLru<&'static str, i32, 4> {
 }
 
 // Helper function to verify DLL structure
-fn verify_dll_structure<K: Eq + Hash + Default, V: Default, const N: usize>(cache: &TinyLru<K, V, N>) {
+fn verify_dll_structure<K: Eq + Hash + Default + Clone, V: Default, const N: usize>(cache: &TinyLru<K, V, N>) {
     if cache.is_empty() {
         assert_eq!(cache.head, u16::MAX);
         assert_eq!(cache.tail, u16::MAX);
@@ -59,7 +59,7 @@ fn test_new() {
     assert_eq!(cache.len(), 0);
     assert!(cache.is_empty());
     assert_eq!(cache.capacity(), 4);
-    assert!(!cache.is_spill);
+    assert!(!cache.index.is_some());
     verify_dll_structure(&cache);
 }
 
@@ -69,7 +69,7 @@ fn test_with_capacity() {
     assert_eq!(cache.len(), 0);
     assert!(cache.is_empty());
     assert_eq!(cache.capacity(), 8);
-    assert!(!cache.is_spill);
+    assert!(!cache.index.is_some());
     verify_dll_structure(&cache);
 }
 
@@ -87,17 +87,17 @@ fn test_push_single() {
     assert_eq!(cache.len(), 1);
     assert!(!cache.is_empty());
     assert_eq!(cache.capacity(), 4);
-    assert!(!cache.is_spill);
+    assert!(!cache.index.is_some());
     verify_dll_structure(&cache);
 }
 
 #[test]
 fn test_push_multiple() {
-    let mut cache = create_test_cache();
+    let cache = create_test_cache();
     
     assert_eq!(cache.len(), 3);
     assert!(!cache.is_empty());
-    assert!(!cache.is_spill);
+    assert!(!cache.index.is_some());
     verify_dll_structure(&cache);
 }
 
@@ -160,7 +160,7 @@ fn test_get_mut_nonexistent() {
 
 #[test]
 fn test_peek_existing() {
-    let mut cache = create_test_cache();
+    let cache = create_test_cache();
     
     // Peek at existing key (should not promote)
     assert_eq!(cache.peek(&"a"), Some(&1));
@@ -172,7 +172,7 @@ fn test_peek_existing() {
 
 #[test]
 fn test_peek_nonexistent() {
-    let mut cache = create_test_cache();
+    let cache = create_test_cache();
     
     // Peek at non-existent key
     assert_eq!(cache.peek(&"nonexistent"), None);
@@ -274,7 +274,7 @@ fn test_clear() {
     assert_eq!(cache.len(), 0);
     assert!(cache.is_empty());
     assert_eq!(cache.capacity(), 4); // Capacity should remain unchanged
-    assert!(!cache.is_spill);
+    assert!(!cache.index.is_some());
     
     verify_dll_structure(&cache);
 }

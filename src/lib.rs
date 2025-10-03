@@ -8,6 +8,7 @@ extern crate alloc;
 
 use core::hash::Hash;
 use tinyvec::TinyVec;
+use likely_stable::unlikely;
 
 /// Maximum capacity for v1 implementation (u16::MAX - 1)
 const MAX_CAPACITY: u16 = u16::MAX - 1;
@@ -16,7 +17,7 @@ const MAX_CAPACITY: u16 = u16::MAX - 1;
 #[derive(Default, Clone)]
 pub struct Entry<K, V> 
 where
-    K: Default,
+    K: Default + Clone,
     V: Default,
 {
     pub key: K,
@@ -29,7 +30,7 @@ where
 #[derive(Clone)]
 pub struct TinyLru<K, V, const N: usize>
 where
-    K: Eq + Hash + Default,
+    K: PartialEq + Hash + Default + Clone,
     V: Default,
 {
     // Unified node storage; starts inline, spills to heap as capacity grows.
@@ -51,9 +52,6 @@ where
     // - size and capacity are u16; maximum capacity <= 65,534 (u16::MAX - 1)
     // - set_capacity requires new_cap > size and new_cap >= N
     capacity: u16,
-
-    // Mode flag (informational): true once first heap allocation occurs; unspill is explicit
-    is_spill: bool,
 }
 
 // Compile-time assertion: N must be <= MAX_CAPACITY
@@ -63,7 +61,7 @@ const fn assert_capacity_limit<const N: usize>() {
 
 impl<K, V, const N: usize> TinyLru<K, V, N>
 where
-    K: Eq + Hash + Default,
+    K: Eq + Hash + Default + Clone,
     V: Default,
 {
     /// Create with capacity = N.
@@ -77,7 +75,6 @@ where
             tail: u16::MAX, // Sentinel value for empty list
             index: None,    // No HashMap allocated pre-spill
             capacity: N as u16,
-            is_spill: false,
         }
     }
 
@@ -95,7 +92,6 @@ where
             tail: u16::MAX, // Sentinel value for empty list
             index: None,    // No HashMap allocated pre-spill
             capacity: cap,
-            is_spill: false,
         }
     }
 
@@ -110,34 +106,18 @@ where
             return;
         }
 
-        // Key doesn't exist - need to insert new entry
-        if self.size < self.capacity {
-            // Cache has space - insert directly
-            if self.size < N as u16 {
-                // Pre-spill: store inline (no allocations)
-                self.insert_inline(key, value);
-            } else {
-                // Post-spill: use heap storage
-                todo!("spill: insert new entry in heap mode");
-            }
-        } else {
-            // Cache is full - evict LRU first, then insert
-            if self.is_spill {
-                todo!("spill: evict LRU entry and insert new entry in heap mode");
-            } else {
-                // Pre-spill: evict LRU, then insert new entry
-                self.pop(); // Remove LRU entry
-                self.insert_inline(key, value); // Insert new entry
-            }
+        if unlikely(self.size >= self.capacity) {
+            self.pop();
         }
+        if unlikely(self.size == N as u16) { 
+            self.spill();
+        }
+
+        self.insert(key, value);
     }
 
     /// Pop and return the LRU entry.
     pub fn pop(&mut self) -> Option<(K, V)> {
-        if self.is_spill {
-            todo!("pop: post-spill pop not implemented yet")
-        }
-
         if self.is_empty() {
             return None;
         }
@@ -148,6 +128,12 @@ where
         let next_index_before = self.store[lru_index].next;
         let last_index_before = (self.size - 1) as usize;
         
+        // Remove LRU key from index (if post-spill)
+        if self.index.is_some() {
+            let lru_key = self.store[lru_index].key.clone();
+            self.index.as_mut().unwrap().remove(&lru_key);
+        }
+        
         // Extract the key-value pair before removal
         let entry = self.store.swap_remove(lru_index);
         let (key, value) = (entry.key, entry.val);
@@ -156,25 +142,30 @@ where
         self.size -= 1;
         
         // Handle DLL updates
-        if self.size == 0 {
+        if unlikely(self.size == 0) {
             // Last element removed - reset to empty state
             self.head = u16::MAX;
             self.tail = u16::MAX;
         } else {
             // Update head to next element (adjust if it pointed at the old last index)
-            if lru_index < last_index_before && next_index_before as usize == last_index_before {
-                // The old next was the last element which moved into lru_index
-                self.head = lru_index as u16;
-            } else {
+            if next_index_before as usize != last_index_before {
                 self.head = next_index_before;
             }
-            if self.head != u16::MAX {
-                self.store[self.head as usize].prev = u16::MAX;
-            }
+            self.store[self.head as usize].prev = u16::MAX;
             
             // If we swapped with the last element, update its index in the DLL
             if lru_index < self.size as usize {
                 self.update_swapped_element_index(lru_index);
+                
+                // Update index for the swapped element (if post-spill)
+                if self.index.is_some() {
+                    // Remove the old key at lru_index (the last element's key)
+                    let swapped_key = self.store[lru_index].key.clone();
+                    self.index.as_mut().unwrap().remove(&swapped_key);
+                    
+                    // Insert the swapped element's key at its new position
+                    self.index.as_mut().unwrap().insert(swapped_key, lru_index as u16);
+                }
             }
         }
         
@@ -182,12 +173,7 @@ where
     }
 
     /// Get by key, promoting to MRU on hit.
-    #[inline(always)]
     pub fn get(&mut self, key: &K) -> Option<&V> {
-        if self.is_spill {
-            todo!("post-spill get: use hashmap index and promote to MRU")
-        }
-
         if let Some(index) = self.find_key_index(key) {
             self.promote_to_mru(index);
             Some(&self.store[index].val)
@@ -197,12 +183,7 @@ where
     }
 
     /// Get mutable by key, promoting to MRU on hit.
-    #[inline(always)]
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        if self.is_spill {
-            todo!("post-spill get_mut: use hashmap index and promote to MRU")
-        }
-
         if let Some(index) = self.find_key_index(key) {
             self.promote_to_mru(index);
             Some(&mut self.store[index].val)
@@ -212,23 +193,25 @@ where
     }
 
     /// Peek without promotion.
-    #[inline(always)]
     pub fn peek(&self, key: &K) -> Option<&V> {
         self.find_key_index(key).map(|index| &self.store[index].val)
     }
 
     /// Remove by key and return owned pair.
     pub fn remove(&mut self, key: &K) -> Option<(K, V)> {
-        if self.is_spill {
-            todo!("remove: post-spill removal not implemented yet")
-        }
-
         // Find the key index
         let index = self.find_key_index(key)?;
         
         let last_index_before = (self.size - 1) as usize;
         let removed_prev = self.store[index].prev;
         let removed_next = self.store[index].next;
+        
+        // Remove target key from index (if post-spill)
+        if self.index.is_some() {
+            let target_key = self.store[index].key.clone();
+            self.index.as_mut().unwrap().remove(&target_key);
+        }
+        
         // Extract the key-value pair before removal
         let entry = self.store.swap_remove(index);
         let (key, value) = (entry.key, entry.val);
@@ -255,6 +238,16 @@ where
             // If we swapped with the last element, update its index in the DLL
             if index < self.size as usize {
                 self.update_swapped_element_index(index);
+                
+                // Update index for the swapped element (if post-spill)
+                if self.index.is_some() {
+                    // Remove the old key at index (the last element's key)
+                    let swapped_key = self.store[index].key.clone();
+                    self.index.as_mut().unwrap().remove(&swapped_key);
+                    
+                    // Insert the swapped element's key at its new position
+                    self.index.as_mut().unwrap().insert(swapped_key, index as u16);
+                }
             }
         }
         
@@ -273,7 +266,6 @@ where
         
         // Clear HashMap index for simplicity
         self.index = None;
-        self.is_spill = false;
     }
 
     /// Adjust capacity. Requires new_cap > size and new_cap >= N.
@@ -281,10 +273,6 @@ where
         // Validate requirements
         assert!(new_cap > self.size, "new_cap must be > current size");
         assert!(new_cap >= N as u16, "new_cap must be >= N");
-        
-        if self.is_spill {
-            todo!("set_capacity: post-spill capacity adjustment not implemented yet")
-        }
         
         // Pre-spill: just update the capacity field
         // The TinyVec will handle spill automatically when we exceed N
@@ -307,7 +295,6 @@ where
     }
 
     /// Contains key.
-    #[inline(always)]
     pub fn contains_key(&self, key: &K) -> bool {
         self.find_key_index(key).is_some()
     }
@@ -315,13 +302,13 @@ where
 
     /// Find the index of a key.
     /// - Pre-spill: linear scan over compact TinyVec
-    /// - Post-spill: todo!() to use hashmap index for O(1)
+    /// - Post-spill: O(1) hashmap index lookup
     /// Returns None if key not found.
     #[inline(always)]
     fn find_key_index(&self, key: &K) -> Option<usize> {
-        if self.is_spill {
+        if let Some(index) = &self.index {
             // Post-spill: look up via hashmap index
-            todo!("post-spill find_key_index: use hashmap index for O(1) lookup")
+            index.get(key).map(|&idx| idx as usize)
         } else {
             // Pre-spill: use raw slice iteration
             let entries = &self.store[..self.size as usize];
@@ -338,13 +325,27 @@ where
         }
     }
 
-    /// Insert a new entry inline (pre-spill only).
-    fn insert_inline(&mut self, key: K, value: V) {
+    /// Spill to heap.
+    #[cold]
+    fn spill(&mut self) {
+        self.index = Some(hashbrown::HashMap::new());
+        for i in 0..self.size as usize {
+            self.index.as_mut().unwrap().insert(self.store[i].key.clone(), i as u16);
+        }
+    }
+
+    /// Insert a new entry
+    #[inline(always)]
+    fn insert(&mut self, key: K, value: V) {
         let new_index = self.size as usize;
         
+        if self.index.is_some() {
+            self.index.as_mut().unwrap().insert(key.clone(), new_index as u16);
+        }
+
         // Create new entry
         let new_entry = Entry {
-            key,
+            key: key, // Clone for the entry
             val: value,
             next: u16::MAX, // Will be set to current tail
             prev: self.tail, // Previous MRU
@@ -430,6 +431,7 @@ where
     }
 
     /// Remove a node from the doubly-linked list.
+    #[inline(always)]
     fn remove_from_dll(&mut self, _index: usize, prev: u16, next: u16) {
         // Update previous node's next pointer
         if prev != u16::MAX {
@@ -449,9 +451,8 @@ where
     }
 
     /// Update the index of a swapped element in the DLL.
-    fn update_swapped_element_index(&mut self, old_index: usize) {
-        let new_index = old_index;
-        
+    #[inline(always)]
+    fn update_swapped_element_index(&mut self, new_index: usize) {
         // Copy the prev/next values to avoid borrow conflicts
         let prev = self.store[new_index].prev;
         let next = self.store[new_index].next;
