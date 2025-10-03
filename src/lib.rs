@@ -106,11 +106,11 @@ where
             return;
         }
 
+        if unlikely(self.size == N as u16 && self.capacity > N as u16) { 
+            self.spill();
+        }
         if unlikely(self.size >= self.capacity) {
             self.pop();
-        }
-        if unlikely(self.size == N as u16) { 
-            self.spill();
         }
 
         self.insert(key, value);
@@ -264,7 +264,7 @@ where
         self.head = u16::MAX; // Sentinel value for empty list
         self.tail = u16::MAX; // Sentinel value for empty list
         
-        // Clear HashMap index for simplicity
+        // Clear HashMap index - reset to pre-spill state
         self.index = None;
     }
 

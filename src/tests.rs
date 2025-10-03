@@ -598,3 +598,732 @@ fn test_pop_all_elements() {
     
     verify_dll_structure(&cache);
 }
+
+// ============================================================================
+// POST-SPILL TESTS
+// ============================================================================
+
+// Helper function to force a cache into post-spill state
+fn force_spill(cache: &mut TinyLru<&str, i32, 3>) {
+    // Fill to exactly N elements, then add one more to trigger spill
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+}
+
+// Helper function to verify index consistency post-spill
+fn verify_index_consistency<K: Eq + Hash + Default + Clone, V: Default, const N: usize>(
+    cache: &TinyLru<K, V, N>
+) {
+    if cache.index.is_none() {
+        return; // Pre-spill, no index to verify
+    }
+    
+    let index = cache.index.as_ref().unwrap();
+    
+    // Verify all entries in the array have corresponding index entries
+    for i in 0..cache.size as usize {
+        let key = &cache.store[i].key;
+        assert_eq!(index.get(key), Some(&(i as u16)), 
+                   "Index entry for key at position {} should point to index {}", i, i);
+    }
+    
+    // Verify index size matches array size
+    assert_eq!(index.len(), cache.size as usize,
+               "Index size {} should match array size {}", index.len(), cache.size);
+}
+
+// Helper function to verify post-spill state
+fn verify_post_spill_state<K: Eq + Hash + Default + Clone, V: Default, const N: usize>(
+    cache: &TinyLru<K, V, N>
+) {
+    assert!(cache.index.is_some(), "Cache should be in post-spill state");
+    verify_index_consistency(cache);
+    verify_dll_structure(cache);
+}
+
+// ============================================================================
+// SPILL TRANSITION TESTS
+// ============================================================================
+
+#[test]
+fn test_basic_spill_transition() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Pre-spill: should have no index
+    assert!(cache.index.is_none());
+    
+    // Fill to exactly N elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    
+    // Still pre-spill
+    assert!(cache.index.is_none());
+    assert_eq!(cache.len(), 3);
+    
+    // Add one more element to trigger spill
+    cache.push("d", 4);
+    
+    // Now post-spill
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 4);
+}
+
+#[test]
+fn test_spill_with_different_n_values() {
+    // Test with N=1
+    let mut cache1: TinyLru<&str, i32, 1> = TinyLru::with_capacity(2);
+    cache1.push("a", 1);
+    assert!(cache1.index.is_none()); // Still pre-spill
+    cache1.push("b", 2); // Triggers spill
+    verify_post_spill_state(&cache1);
+    
+    // Test with N=2
+    let mut cache2: TinyLru<&str, i32, 2> = TinyLru::with_capacity(3);
+    cache2.push("a", 1);
+    cache2.push("b", 2);
+    assert!(cache2.index.is_none()); // Still pre-spill
+    cache2.push("c", 3); // Triggers spill
+    verify_post_spill_state(&cache2);
+    
+    // Test with N=4
+    let mut cache4: TinyLru<String, i32, 4> = TinyLru::with_capacity(5);
+    for i in 0..4 {
+        let key = format!("key{}", i);
+        cache4.push(key, i);
+    }
+    assert!(cache4.index.is_none()); // Still pre-spill
+    cache4.push("key4".to_string(), 4); // Triggers spill
+    verify_post_spill_state(&cache4);
+}
+
+#[test]
+fn test_spill_with_capacity_larger_than_n() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(8);
+    
+    // Fill to N elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    assert!(cache.index.is_none()); // Still pre-spill
+    
+    // Add one more to trigger spill
+    cache.push("d", 4);
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.capacity(), 8);
+    assert_eq!(cache.len(), 4);
+}
+
+#[test]
+fn test_spill_state_persistence() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    verify_post_spill_state(&cache);
+    
+    // Remove elements to get below N
+    cache.pop(); // Remove one element
+    assert_eq!(cache.len(), 3);
+    assert!(cache.index.is_some(), "Index should persist even with fewer than N elements");
+    
+    // Remove more elements
+    cache.pop();
+    cache.pop();
+    assert_eq!(cache.len(), 1);
+    assert!(cache.index.is_some(), "Index should persist even with just 1 element");
+    
+    // Clear and verify index is cleared
+    cache.clear();
+    assert!(cache.index.is_none(), "Index should be cleared after clear()");
+}
+
+// ============================================================================
+// POST-SPILL PUSH OPERATIONS TESTS
+// ============================================================================
+
+#[test]
+fn test_push_new_key_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    verify_post_spill_state(&cache);
+    
+    // Push new key post-spill
+    cache.push("new_key", 100);
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 4); // At capacity, should evict LRU
+    assert_eq!(cache.get(&"new_key"), Some(&100));
+    // "a" should be evicted (was LRU)
+    assert_eq!(cache.get(&"a"), None);
+}
+
+#[test]
+fn test_push_existing_key_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Create cache with known elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    
+    // Update existing key post-spill
+    cache.push("b", 200);
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 4); // Size unchanged
+    assert_eq!(cache.get(&"b"), Some(&200));
+    
+    // Verify "b" is now MRU (last in DLL)
+    assert_eq!(cache.tail, cache.find_key_index(&"b").unwrap() as u16);
+}
+
+#[test]
+fn test_push_at_capacity_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(5);
+    
+    // Fill to capacity
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    cache.push("e", 5); // At capacity
+    
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 5);
+    assert_eq!(cache.capacity(), 5);
+    
+    // Push one more - should evict LRU
+    cache.push("f", 6);
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 5); // Size unchanged
+    assert_eq!(cache.capacity(), 5);
+    
+    // "a" should be evicted (was LRU)
+    assert_eq!(cache.get(&"a"), None);
+    assert_eq!(cache.get(&"f"), Some(&6));
+}
+
+#[test]
+fn test_multiple_pushes_post_spill() {
+    let mut cache: TinyLru<String, i32, 2> = TinyLru::with_capacity(3);
+    
+    // Trigger spill
+    cache.push("a".to_string(), 1);
+    cache.push("b".to_string(), 2);
+    cache.push("c".to_string(), 3); // Triggers spill
+    verify_post_spill_state(&cache);
+    
+    // Multiple pushes post-spill
+    for i in 0..10 {
+        let key = format!("key{}", i);
+        cache.push(key, i);
+        verify_post_spill_state(&cache);
+    }
+    
+    // Should have evicted some elements
+    assert_eq!(cache.len(), 3); // N+1 elements
+    assert!(cache.get(&"key0".to_string()).is_none()); // Should be evicted
+    assert!(cache.get(&"key9".to_string()).is_some()); // Should be present (MRU)
+}
+
+// ============================================================================
+// POST-SPILL GET OPERATIONS TESTS
+// ============================================================================
+
+#[test]
+fn test_get_existing_key_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Create cache with known elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    
+    // Get existing key post-spill
+    assert_eq!(cache.get(&"b"), Some(&2));
+    verify_post_spill_state(&cache);
+    
+    // Verify "b" is promoted to MRU
+    assert_eq!(cache.tail, cache.find_key_index(&"b").unwrap() as u16);
+}
+
+#[test]
+fn test_get_nonexistent_key_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    verify_post_spill_state(&cache);
+    
+    // Get non-existent key post-spill
+    assert_eq!(cache.get(&"nonexistent"), None);
+    verify_post_spill_state(&cache);
+}
+
+#[test]
+fn test_get_mut_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Create cache with known elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    
+    // Get mutable reference post-spill
+    if let Some(value) = cache.get_mut(&"b") {
+        *value = 200;
+    }
+    
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.get(&"b"), Some(&200));
+    
+    // Verify "b" is promoted to MRU
+    assert_eq!(cache.tail, cache.find_key_index(&"b").unwrap() as u16);
+}
+
+#[test]
+fn test_peek_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Create cache with known elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    
+    // Peek existing key post-spill (should not promote)
+    let initial_tail = cache.tail;
+    assert_eq!(cache.peek(&"b"), Some(&2));
+    assert_eq!(cache.tail, initial_tail); // Tail should not change
+    
+    // Peek non-existent key post-spill
+    assert_eq!(cache.peek(&"nonexistent"), None);
+}
+
+// ============================================================================
+// POST-SPILL REMOVE OPERATIONS TESTS
+// ============================================================================
+
+#[test]
+fn test_remove_existing_key_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Create cache with known elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    
+    // Remove existing key post-spill
+    assert_eq!(cache.remove(&"b"), Some(("b", 2)));
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 3);
+    assert_eq!(cache.get(&"b"), None);
+}
+
+#[test]
+fn test_remove_nonexistent_key_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    verify_post_spill_state(&cache);
+    
+    // Remove non-existent key post-spill
+    assert_eq!(cache.remove(&"nonexistent"), None);
+    verify_post_spill_state(&cache);
+}
+
+#[test]
+fn test_remove_head_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Create cache with known elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    
+    // Remove head (LRU) post-spill
+    let initial_head = cache.head;
+    assert_eq!(cache.remove(&"a"), Some(("a", 1)));
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 3);
+    
+    // Head should be updated
+    assert_ne!(cache.head, initial_head);
+}
+
+#[test]
+fn test_remove_tail_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Create cache with known elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    
+    // Remove tail (MRU) post-spill
+    let initial_tail = cache.tail;
+    assert_eq!(cache.remove(&"d"), Some(("d", 4)));
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 3);
+    
+    // Tail should be updated
+    assert_ne!(cache.tail, initial_tail);
+}
+
+#[test]
+fn test_remove_middle_element_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Create cache with known elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    
+    // Remove middle element post-spill
+    assert_eq!(cache.remove(&"b"), Some(("b", 2)));
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 3);
+    
+    // DLL should still be intact
+    verify_dll_structure(&cache);
+}
+
+#[test]
+fn test_remove_last_element_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Create cache with single element post-spill
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3); // Fill to N elements
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 4);
+    
+    // Remove elements to get to single element
+    cache.pop(); // Remove "a"
+    cache.pop(); // Remove "b"
+    cache.pop(); // Remove "c"
+    
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 1);
+    
+    // Remove the last element
+    assert_eq!(cache.remove(&"d"), Some(("d", 4)));
+    assert!(cache.is_empty());
+    assert!(cache.index.is_some()); // Index should persist
+}
+
+// ============================================================================
+// POST-SPILL POP OPERATIONS TESTS
+// ============================================================================
+
+#[test]
+fn test_pop_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Create cache with known elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    
+    // Pop LRU post-spill
+    assert_eq!(cache.pop(), Some(("a", 1)));
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 3);
+    
+    // Next pop should remove "b"
+    assert_eq!(cache.pop(), Some(("b", 2)));
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 2);
+}
+
+#[test]
+fn test_pop_last_element_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Create cache with single element post-spill
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3); // Fill to N elements
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 4);
+    
+    // Pop elements to get to single element
+    cache.pop(); // Remove "a"
+    cache.pop(); // Remove "b" 
+    cache.pop(); // Remove "c"
+    
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 1);
+    
+    // Pop the last element
+    assert_eq!(cache.pop(), Some(("d", 4)));
+    assert!(cache.is_empty());
+    assert!(cache.index.is_some()); // Index should persist (not cleared by pop)
+}
+
+#[test]
+fn test_pop_all_elements_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    verify_post_spill_state(&cache);
+    
+    // Pop all elements
+    while !cache.is_empty() {
+        cache.pop();
+        if !cache.is_empty() {
+            verify_post_spill_state(&cache);
+        }
+    }
+    
+    assert!(cache.is_empty());
+    assert!(cache.index.is_some()); // Index should persist (not cleared by pop)
+}
+
+// ============================================================================
+// INDEX CONSISTENCY TESTS
+// ============================================================================
+
+#[test]
+fn test_index_consistency_after_swap_remove() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(5);
+    
+    // Create cache with known elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    cache.push("e", 5);
+    
+    verify_post_spill_state(&cache);
+    
+    // Remove middle element (should trigger swap_remove)
+    assert_eq!(cache.remove(&"b"), Some(("b", 2)));
+    verify_post_spill_state(&cache);
+    
+    // Verify all remaining elements have correct index entries
+    verify_index_consistency(&cache);
+}
+
+#[test]
+fn test_index_consistency_after_promotion() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Create cache with known elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    
+    // Promote "a" to MRU
+    cache.get(&"a");
+    verify_post_spill_state(&cache);
+    
+    // Verify index consistency after promotion
+    verify_index_consistency(&cache);
+}
+
+#[test]
+fn test_index_consistency_after_eviction() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Fill to capacity
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    
+    // Add one more to trigger eviction
+    cache.push("e", 5);
+    verify_post_spill_state(&cache);
+    
+    // Verify index consistency after eviction
+    verify_index_consistency(&cache);
+    
+    // "a" should be evicted
+    assert_eq!(cache.get(&"a"), None);
+}
+
+// ============================================================================
+// EDGE CASES AND MIXED OPERATIONS TESTS
+// ============================================================================
+
+#[test]
+fn test_spill_with_single_element() {
+    let mut cache: TinyLru<&str, i32, 1> = TinyLru::with_capacity(2);
+    
+    // Add first element
+    cache.push("a", 1);
+    assert!(cache.index.is_none()); // Still pre-spill
+    
+    // Add second element to trigger spill
+    cache.push("b", 2);
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 2);
+}
+
+#[test]
+fn test_complex_operation_sequence_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    verify_post_spill_state(&cache);
+    
+    // Complex sequence of operations
+    cache.push("new1", 100);
+    verify_post_spill_state(&cache);
+    
+    cache.get(&"new1"); // Promote to MRU
+    verify_post_spill_state(&cache);
+    
+    cache.remove(&"new1");
+    verify_post_spill_state(&cache);
+    
+    cache.push("new2", 200);
+    verify_post_spill_state(&cache);
+    
+    cache.pop(); // Remove LRU
+    verify_post_spill_state(&cache);
+    
+    // Final state should be consistent
+    verify_index_consistency(&cache);
+}
+
+#[test]
+fn test_contains_key_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Create cache with known elements
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    cache.push("d", 4); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    
+    // Test contains_key post-spill
+    assert!(cache.contains_key(&"a"));
+    assert!(cache.contains_key(&"b"));
+    assert!(cache.contains_key(&"c"));
+    assert!(cache.contains_key(&"d"));
+    assert!(!cache.contains_key(&"nonexistent"));
+}
+
+#[test]
+fn test_capacity_operations_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    verify_post_spill_state(&cache);
+    
+    // Test capacity operations post-spill
+    assert_eq!(cache.capacity(), 4);
+    assert_eq!(cache.len(), 4);
+    
+    // Set new capacity
+    cache.set_capacity(8);
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.capacity(), 8);
+    assert_eq!(cache.len(), 4);
+}
+
+#[test]
+fn test_clear_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    verify_post_spill_state(&cache);
+    
+    // Clear post-spill
+    cache.clear();
+    assert!(cache.is_empty());
+    assert!(cache.index.is_none()); // Index should be cleared
+    assert_eq!(cache.capacity(), 4);
+}
+
+#[test]
+fn test_different_key_types_post_spill() {
+    let mut cache: TinyLru<i32, &str, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill with integer keys
+    cache.push(1, "a");
+    cache.push(2, "b");
+    cache.push(3, "c");
+    cache.push(4, "d"); // Triggers spill
+    
+    verify_post_spill_state(&cache);
+    
+    // Test operations with integer keys
+    assert_eq!(cache.get(&2), Some(&"b"));
+    assert_eq!(cache.remove(&3), Some((3, "c")));
+    verify_post_spill_state(&cache);
+}
+
+#[test]
+fn test_stress_test_post_spill() {
+    let mut cache: TinyLru<String, i32, 4> = TinyLru::with_capacity(5);
+    
+    // Trigger spill
+    cache.push("a".to_string(), 1);
+    cache.push("b".to_string(), 2);
+    cache.push("c".to_string(), 3);
+    cache.push("d".to_string(), 4);
+    cache.push("e".to_string(), 5); // Triggers spill
+    verify_post_spill_state(&cache);
+    
+    // Stress test with many operations
+    for i in 0..100 {
+        let key = format!("key{}", i);
+        cache.push(key, i);
+        if i % 10 == 0 {
+            verify_post_spill_state(&cache);
+        }
+    }
+    
+    // Final verification
+    verify_post_spill_state(&cache);
+    assert_eq!(cache.len(), 5); // N+1 elements
+}
