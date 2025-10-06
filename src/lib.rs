@@ -37,8 +37,6 @@ where
     // Compact: no holes; deletions swap the last element into the freed index.
     store: TinyVec<[Entry<K, V>; N]>,
 
-    // Current number of live items.
-    size: u16,
 
     // LRU linkage heads (indices into `store`)
     head: u16, // LRU index; sentinel if empty
@@ -70,7 +68,6 @@ where
         
         Self {
             store: TinyVec::new(),
-            size: 0,
             head: u16::MAX, // Sentinel value for empty list
             tail: u16::MAX, // Sentinel value for empty list
             index: None,    // No HashMap allocated pre-spill
@@ -87,7 +84,6 @@ where
         
         Self {
             store: TinyVec::new(),
-            size: 0,
             head: u16::MAX, // Sentinel value for empty list
             tail: u16::MAX, // Sentinel value for empty list
             index: None,    // No HashMap allocated pre-spill
@@ -106,10 +102,10 @@ where
             return;
         }
 
-        if unlikely(self.size == N as u16 && self.capacity > N as u16) { 
+        if unlikely(self.store.len() == N && self.capacity > N as u16) { 
             self.spill();
         }
-        if unlikely(self.size >= self.capacity) {
+        if unlikely(self.store.len() >= self.capacity as usize) {
             self.pop();
         }
 
@@ -126,7 +122,7 @@ where
         let lru_index = self.head as usize;
         // Capture next before swap_remove
         let next_index_before = self.store[lru_index].next;
-        let last_index_before = (self.size - 1) as usize;
+        let last_index_before = self.store.len() - 1;
         
         // Remove LRU key from index (if post-spill)
         if self.index.is_some() {
@@ -138,11 +134,8 @@ where
         let entry = self.store.swap_remove(lru_index);
         let (key, value) = (entry.key, entry.val);
         
-        // Update size
-        self.size -= 1;
-        
         // Handle DLL updates
-        if unlikely(self.size == 0) {
+        if unlikely(self.store.len() == 0) {
             // Last element removed - reset to empty state
             self.head = u16::MAX;
             self.tail = u16::MAX;
@@ -154,7 +147,7 @@ where
             self.store[self.head as usize].prev = u16::MAX;
             
             // If we swapped with the last element, update its index in the DLL
-            if lru_index < self.size as usize {
+            if lru_index < self.store.len() {
                 self.update_swapped_element_index(lru_index);
                 
                 // Update index for the swapped element (if post-spill)
@@ -202,7 +195,7 @@ where
         // Find the key index
         let index = self.find_key_index(key)?;
         
-        let last_index_before = (self.size - 1) as usize;
+        let last_index_before = self.store.len() - 1;
         let removed_prev = self.store[index].prev;
         let removed_next = self.store[index].next;
         
@@ -216,11 +209,8 @@ where
         let entry = self.store.swap_remove(index);
         let (key, value) = (entry.key, entry.val);
         
-        // Update size
-        self.size -= 1;
-        
         // Handle DLL updates
-        if self.size == 0 {
+        if self.store.len() == 0 {
             // Last element removed - reset to empty state
             self.head = u16::MAX;
             self.tail = u16::MAX;
@@ -236,7 +226,7 @@ where
             self.remove_from_dll(index, prev, next);
 
             // If we swapped with the last element, update its index in the DLL
-            if index < self.size as usize {
+            if index < self.store.len() {
                 self.update_swapped_element_index(index);
                 
                 // Update index for the swapped element (if post-spill)
@@ -260,7 +250,6 @@ where
         self.store.clear();
         
         // Reset state to empty
-        self.size = 0;
         self.head = u16::MAX; // Sentinel value for empty list
         self.tail = u16::MAX; // Sentinel value for empty list
         
@@ -271,7 +260,7 @@ where
     /// Adjust capacity. Requires new_cap > size and new_cap >= N.
     pub fn set_capacity(&mut self, new_cap: u16) {
         // Validate requirements
-        assert!(new_cap > self.size, "new_cap must be > current size");
+        assert!(new_cap > self.store.len() as u16, "new_cap must be > current size");
         assert!(new_cap >= N as u16, "new_cap must be >= N");
         
         // Pre-spill: just update the capacity field
@@ -280,13 +269,15 @@ where
     }
 
     /// Current number of items.
+    #[inline]
     pub fn len(&self) -> u16 {
-        self.size
+        self.store.len() as u16
     }
 
     /// Whether the cache is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
-        self.size == 0
+        self.store.is_empty()
     }
 
     /// Current capacity.
@@ -306,7 +297,7 @@ where
 
     /// Check if unspill is currently possible.
     pub fn can_unspill(&self) -> bool {
-        self.is_spilled() && self.size <= N as u16
+        self.is_spilled() && self.store.len() <= N
     }
 
     /// Attempt to unspill from heap back to inline storage.
@@ -336,7 +327,7 @@ where
             index.get(key).map(|&idx| idx as usize)
         } else {
             // Pre-spill: use raw slice iteration
-            let entries = &self.store[..self.size as usize];
+            let entries = &self.store[..self.store.len()];
             for i in 0..entries.len() {
                 // SAFETY: We iterate over `0..entries.len()` where `entries` is a slice of length
                 // `self.size as usize`. Since `i` is guaranteed to be in bounds of this slice,
@@ -354,7 +345,7 @@ where
     #[cold]
     fn spill(&mut self) {
         self.index = Some(hashbrown::HashMap::new());
-        for i in 0..self.size as usize {
+        for i in 0..self.store.len() {
             self.index.as_mut().unwrap().insert(self.store[i].key.clone(), i as u16);
         }
     }
@@ -362,7 +353,7 @@ where
     /// Insert a new entry
     #[inline(always)]
     fn insert(&mut self, key: K, value: V) {
-        let new_index = self.size as usize;
+        let new_index = self.store.len();
         
         if self.index.is_some() {
             self.index.as_mut().unwrap().insert(key.clone(), new_index as u16);
@@ -380,7 +371,7 @@ where
         self.store.push(new_entry);
 
         // Update linked list
-        if self.size == 0 {
+        if self.tail == u16::MAX {
             // First entry - set as both head and tail
             self.head = new_index as u16;
             self.tail = new_index as u16;
@@ -390,22 +381,20 @@ where
             self.tail = new_index as u16;
         }
 
-        // Update size
-        self.size += 1;
     }
 
     /// Promote an entry to MRU (move to tail).
     #[inline(always)]
     fn promote_to_mru(&mut self, index: usize) {
         // Early return if already MRU or only one element
-        if self.size <= 1 || index == self.tail as usize {
+        if self.store.len() <= 1 || index == self.tail as usize {
             return;
         }
 
-        // SAFETY: `index` comes from `find_key_index`, so 0 <= index < self.size.
+        // SAFETY: `index` comes from `find_key_index`, so 0 <= index < self.store.len().
         // We use unchecked access to eliminate bounds checks on the hot path.
         let entries: *mut [Entry<K, V>] = self.store.as_mut_slice();
-        // SAFETY: `index` is guaranteed to be in bounds (0 <= index < self.size) since it
+        // SAFETY: `index` is guaranteed to be in bounds (0 <= index < self.store.len()) since it
         // comes from `find_key_index`. The raw pointer dereference is safe because `entries`
         // is derived from `self.store.as_mut_slice()` which is a valid mutable slice.
         let entry = unsafe { (&mut *entries).get_unchecked_mut(index) };
@@ -420,7 +409,7 @@ where
             if self.head != u16::MAX {
                 let head_idx = self.head as usize;
                 // SAFETY: `head_idx` is derived from `self.head` which is a valid index into
-                // the store (either u16::MAX sentinel or a valid index < self.size). Since we
+                // the store (either u16::MAX sentinel or a valid index < self.store.len()). Since we
                 // just set `self.head = next` and `next` comes from a valid entry, `head_idx`
                 // is guaranteed to be in bounds. The raw pointer dereference is safe as above.
                 unsafe { (&mut *entries).get_unchecked_mut(head_idx) }.prev = u16::MAX;
@@ -430,7 +419,7 @@ where
             let prev_idx = prev as usize;
             // SAFETY: `prev_idx` is derived from `prev` which comes from a valid entry's `prev`
             // field. Since we're not at the head (else branch), `prev` must be a valid index
-            // < self.size. The raw pointer dereference is safe as above.
+            // < self.store.len(). The raw pointer dereference is safe as above.
             unsafe { (&mut *entries).get_unchecked_mut(prev_idx) }.next = next;
         }
 
@@ -438,7 +427,7 @@ where
         if next != u16::MAX {
             let next_idx = next as usize;
             // SAFETY: `next_idx` is derived from `next` which comes from a valid entry's `next`
-            // field. Since `next != u16::MAX`, it must be a valid index < self.size. The raw
+            // field. Since `next != u16::MAX`, it must be a valid index < self.store.len(). The raw
             // pointer dereference is safe as above.
             unsafe { (&mut *entries).get_unchecked_mut(next_idx) }.prev = prev;
         }
@@ -449,7 +438,7 @@ where
         entry.next = u16::MAX;
         let old_tail_idx = old_tail as usize;
         // SAFETY: `old_tail_idx` is derived from `self.tail` which is guaranteed to be a valid
-        // index < self.size (not u16::MAX) since we're in the promote_to_mru function and there
+        // index < self.store.len() (not u16::MAX) since we're in the promote_to_mru function and there
         // are at least 2 elements (early return check). The raw pointer dereference is safe as above.
         unsafe { (&mut *entries).get_unchecked_mut(old_tail_idx) }.next = entry_index;
         self.tail = entry_index;

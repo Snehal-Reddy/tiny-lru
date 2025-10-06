@@ -19,8 +19,8 @@ fn verify_dll_structure<K: Eq + Hash + Default + Clone, V: Default, const N: usi
     }
 
     // Verify head and tail are valid
-    assert!(cache.head < cache.size);
-    assert!(cache.tail < cache.size);
+    assert!(cache.head < cache.len());
+    assert!(cache.tail < cache.len());
     
     // Verify head has no previous element
     assert_eq!(cache.store[cache.head as usize].prev, u16::MAX);
@@ -50,7 +50,7 @@ fn verify_dll_structure<K: Eq + Hash + Default + Clone, V: Default, const N: usi
     }
     
     // Verify we visited all elements
-    assert_eq!(count, cache.size);
+    assert_eq!(count, cache.len());
 }
 
 #[test]
@@ -623,15 +623,15 @@ fn verify_index_consistency<K: Eq + Hash + Default + Clone, V: Default, const N:
     let index = cache.index.as_ref().unwrap();
     
     // Verify all entries in the array have corresponding index entries
-    for i in 0..cache.size as usize {
+    for i in 0..cache.len() as usize {
         let key = &cache.store[i].key;
         assert_eq!(index.get(key), Some(&(i as u16)), 
                    "Index entry for key at position {} should point to index {}", i, i);
     }
     
     // Verify index size matches array size
-    assert_eq!(index.len(), cache.size as usize,
-               "Index size {} should match array size {}", index.len(), cache.size);
+    assert_eq!(index.len(), cache.len() as usize,
+               "Index size {} should match array size {}", index.len(), cache.len());
 }
 
 // Helper function to verify post-spill state
