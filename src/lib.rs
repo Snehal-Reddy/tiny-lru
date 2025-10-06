@@ -299,6 +299,31 @@ where
         self.find_key_index(key).is_some()
     }
 
+    /// Check if the cache is currently spilled to heap.
+    pub fn is_spilled(&self) -> bool {
+        self.index.is_some()
+    }
+
+    /// Check if unspill is currently possible.
+    pub fn can_unspill(&self) -> bool {
+        self.is_spilled() && self.size <= N as u16
+    }
+
+    /// Attempt to unspill from heap back to inline storage.
+    /// Returns true if unspill was successful, false if not possible.
+    pub fn unspill(&mut self) -> bool {
+        if !self.can_unspill() {
+            return false;
+        }
+
+        // Let tinyvec handle the storage transition
+        self.store.shrink_to_fit();
+
+        // Clear HashMap index to return to pre-spill state
+        self.index = None;
+
+        true
+    }
 
     /// Find the index of a key.
     /// - Pre-spill: linear scan over compact TinyVec
