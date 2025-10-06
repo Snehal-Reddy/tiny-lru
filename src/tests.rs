@@ -1327,3 +1327,444 @@ fn test_stress_test_post_spill() {
     verify_post_spill_state(&cache);
     assert_eq!(cache.len(), 5); // N+1 elements
 }
+
+// ============================================================================
+// UNSPILL TESTS
+// ============================================================================
+
+#[test]
+fn test_is_spilled_pre_spill() {
+    let cache: TinyLru<&str, i32, 4> = TinyLru::new();
+    assert!(!cache.is_spilled());
+    
+    let mut cache = cache;
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    assert!(!cache.is_spilled()); // Still pre-spill
+}
+
+#[test]
+fn test_is_spilled_post_spill() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+}
+
+#[test]
+fn test_can_unspill_pre_spill() {
+    let mut cache: TinyLru<&str, i32, 4> = TinyLru::new();
+    assert!(!cache.can_unspill()); // Not spilled
+    
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    assert!(!cache.can_unspill()); // Still not spilled
+}
+
+#[test]
+fn test_can_unspill_post_spill_size_too_large() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+    assert!(!cache.can_unspill()); // Size (4) > N (3)
+}
+
+#[test]
+fn test_can_unspill_post_spill_size_fits() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+    assert!(!cache.can_unspill()); // Size (4) > N (3)
+    
+    // Remove one element to make size <= N
+    cache.pop();
+    assert!(cache.is_spilled());
+    assert!(cache.can_unspill()); // Size (3) <= N (3)
+}
+
+#[test]
+fn test_unspill_pre_spill() {
+    let mut cache: TinyLru<&str, i32, 4> = TinyLru::new();
+    cache.push("a", 1);
+    cache.push("b", 2);
+    cache.push("c", 3);
+    
+    // Try to unspill when not spilled
+    assert!(!cache.unspill());
+    assert!(!cache.is_spilled());
+    assert_eq!(cache.len(), 3);
+}
+
+#[test]
+fn test_unspill_post_spill_size_too_large() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+    assert_eq!(cache.len(), 4);
+    
+    // Try to unspill when size > N
+    assert!(!cache.unspill());
+    assert!(cache.is_spilled()); // Should still be spilled
+    assert_eq!(cache.len(), 4);
+}
+
+#[test]
+fn test_unspill_successful() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+    assert_eq!(cache.len(), 4);
+    
+    // Remove one element to make size <= N
+    cache.pop();
+    assert!(cache.is_spilled());
+    assert_eq!(cache.len(), 3);
+    assert!(cache.can_unspill());
+    
+    // Unspill should succeed
+    assert!(cache.unspill());
+    assert!(!cache.is_spilled()); // Should be back to pre-spill
+    assert_eq!(cache.len(), 3);
+    
+    // Verify all elements are still accessible
+    assert!(cache.contains_key(&"b"));
+    assert!(cache.contains_key(&"c"));
+    assert!(cache.contains_key(&"d"));
+    assert!(!cache.contains_key(&"a")); // Was popped
+    
+    // Verify DLL structure is intact
+    verify_dll_structure(&cache);
+}
+
+#[test]
+fn test_unspill_with_single_element() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+    
+    // Remove all but one element
+    cache.pop(); // Remove "a"
+    cache.pop(); // Remove "b"
+    cache.pop(); // Remove "c"
+    assert_eq!(cache.len(), 1);
+    assert!(cache.is_spilled());
+    assert!(cache.can_unspill());
+    
+    // Unspill should succeed
+    assert!(cache.unspill());
+    assert!(!cache.is_spilled());
+    assert_eq!(cache.len(), 1);
+    
+    // Verify the single element is still accessible
+    assert!(cache.contains_key(&"d"));
+    assert_eq!(cache.get(&"d"), Some(&4));
+    
+    // Verify DLL structure is intact
+    verify_dll_structure(&cache);
+}
+
+#[test]
+fn test_unspill_with_two_elements() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+    
+    // Remove two elements to get size = 2
+    cache.pop(); // Remove "a"
+    cache.pop(); // Remove "b"
+    assert_eq!(cache.len(), 2);
+    assert!(cache.is_spilled());
+    assert!(cache.can_unspill());
+    
+    // Unspill should succeed
+    assert!(cache.unspill());
+    assert!(!cache.is_spilled());
+    assert_eq!(cache.len(), 2);
+    
+    // Verify both elements are still accessible
+    assert!(cache.contains_key(&"c"));
+    assert!(cache.contains_key(&"d"));
+    assert_eq!(cache.get(&"c"), Some(&3));
+    assert_eq!(cache.get(&"d"), Some(&4));
+    
+    // Verify DLL structure is intact
+    verify_dll_structure(&cache);
+}
+
+#[test]
+fn test_unspill_preserves_lru_order() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+    
+    // Remove one element to make size <= N
+    cache.pop(); // Remove "a"
+    assert_eq!(cache.len(), 3);
+    
+    // Promote "b" to MRU before unspill
+    cache.get(&"b");
+    assert_eq!(cache.tail, cache.find_key_index(&"b").unwrap() as u16);
+    
+    // Unspill
+    assert!(cache.unspill());
+    assert!(!cache.is_spilled());
+    
+    // Verify LRU order is preserved
+    // "c" should be LRU (head), "b" should be MRU (tail)
+    assert_eq!(cache.head, cache.find_key_index(&"c").unwrap() as u16);
+    assert_eq!(cache.tail, cache.find_key_index(&"b").unwrap() as u16);
+    
+    // Verify pop still returns LRU
+    let popped = cache.pop();
+    assert_eq!(popped, Some(("c", 3)));
+    
+    verify_dll_structure(&cache);
+}
+
+#[test]
+fn test_unspill_after_operations() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+    
+    // Perform various operations post-spill
+    cache.get(&"b"); // Promote "b" to MRU
+    cache.push("e", 5); // Add new element (should evict "a")
+    cache.remove(&"c"); // Remove "c"
+    
+    assert_eq!(cache.len(), 3);
+    assert!(cache.is_spilled());
+    assert!(cache.can_unspill());
+    
+    // Unspill should succeed
+    assert!(cache.unspill());
+    assert!(!cache.is_spilled());
+    assert_eq!(cache.len(), 3);
+    
+    // Verify final state
+    assert!(cache.contains_key(&"b"));
+    assert!(cache.contains_key(&"d"));
+    assert!(cache.contains_key(&"e"));
+    assert!(!cache.contains_key(&"a")); // Was evicted
+    assert!(!cache.contains_key(&"c")); // Was removed
+    
+    verify_dll_structure(&cache);
+}
+
+#[test]
+fn test_unspill_with_different_n_values() {
+    // Test with N=1
+    let mut cache1: TinyLru<&str, i32, 1> = TinyLru::with_capacity(2);
+    cache1.push("a", 1);
+    cache1.push("b", 2); // Triggers spill
+    assert!(cache1.is_spilled());
+    assert!(!cache1.can_unspill()); // Size (2) > N (1)
+    
+    cache1.pop(); // Remove one element
+    assert!(cache1.can_unspill()); // Size (1) <= N (1)
+    assert!(cache1.unspill());
+    assert!(!cache1.is_spilled());
+    
+    // Test with N=2
+    let mut cache2: TinyLru<&str, i32, 2> = TinyLru::with_capacity(3);
+    cache2.push("a", 1);
+    cache2.push("b", 2);
+    cache2.push("c", 3); // Triggers spill
+    assert!(cache2.is_spilled());
+    assert!(!cache2.can_unspill()); // Size (3) > N (2)
+    
+    cache2.pop(); // Remove one element
+    assert!(cache2.can_unspill()); // Size (2) <= N (2)
+    assert!(cache2.unspill());
+    assert!(!cache2.is_spilled());
+}
+
+#[test]
+fn test_unspill_after_clear() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+    
+    // Clear the cache
+    cache.clear();
+    assert!(!cache.is_spilled()); // Clear resets to pre-spill state
+    assert!(!cache.can_unspill()); // Can't unspill when not spilled
+    
+    // Try to unspill after clear
+    assert!(!cache.unspill());
+    assert!(!cache.is_spilled());
+}
+
+#[test]
+fn test_unspill_with_capacity_changes() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+    
+    // Change capacity
+    cache.set_capacity(8);
+    assert!(cache.is_spilled()); // Still spilled
+    assert!(!cache.can_unspill()); // Size (4) > N (3)
+    
+    // Remove one element
+    cache.pop();
+    assert!(cache.can_unspill()); // Size (3) <= N (3)
+    assert!(cache.unspill());
+    assert!(!cache.is_spilled());
+}
+
+#[test]
+fn test_multiple_unspill_attempts() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+    
+    // First unspill attempt should fail (size > N)
+    assert!(!cache.unspill());
+    assert!(cache.is_spilled());
+    
+    // Remove one element
+    cache.pop();
+    assert!(cache.can_unspill());
+    
+    // Second unspill attempt should succeed
+    assert!(cache.unspill());
+    assert!(!cache.is_spilled());
+    
+    // Third unspill attempt should fail (not spilled)
+    assert!(!cache.unspill());
+    assert!(!cache.is_spilled());
+}
+
+#[test]
+fn test_unspill_stress_test() {
+    let mut cache: TinyLru<String, i32, 4> = TinyLru::with_capacity(5);
+    
+    // Trigger spill
+    cache.push("a".to_string(), 1);
+    cache.push("b".to_string(), 2);
+    cache.push("c".to_string(), 3);
+    cache.push("d".to_string(), 4);
+    cache.push("e".to_string(), 5); // Triggers spill
+    assert!(cache.is_spilled());
+    
+    // Stress test: repeatedly spill and unspill
+    for i in 0..10 {
+        // Remove elements to allow unspill
+        cache.pop();
+        cache.pop();
+        assert!(cache.can_unspill());
+        assert!(cache.unspill());
+        assert!(!cache.is_spilled());
+        
+        // Add elements to trigger spill again
+        cache.push(format!("x{}", i), 100 + i);
+        cache.push(format!("y{}", i), 200 + i);
+        cache.push(format!("z{}", i), 300 + i);
+        assert!(cache.is_spilled());
+        
+        // Verify state consistency
+        verify_dll_structure(&cache);
+    }
+}
+
+#[test]
+fn test_unspill_with_complex_key_types() {
+    let mut cache: TinyLru<Vec<i32>, String, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill with complex keys
+    cache.push(vec![1, 2], "a".to_string());
+    cache.push(vec![3, 4], "b".to_string());
+    cache.push(vec![5, 6], "c".to_string());
+    cache.push(vec![7, 8], "d".to_string()); // Triggers spill
+    assert!(cache.is_spilled());
+    
+    // Remove one element to allow unspill
+    cache.pop();
+    assert!(cache.can_unspill());
+    assert!(cache.unspill());
+    assert!(!cache.is_spilled());
+    
+    // Verify all elements are still accessible
+    assert!(cache.contains_key(&vec![3, 4]));
+    assert!(cache.contains_key(&vec![5, 6]));
+    assert!(cache.contains_key(&vec![7, 8]));
+    assert_eq!(cache.get(&vec![3, 4]), Some(&"b".to_string()));
+    
+    verify_dll_structure(&cache);
+}
+
+#[test]
+fn test_unspill_edge_case_empty_after_operations() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+    
+    // Remove all elements
+    while !cache.is_empty() {
+        cache.pop();
+    }
+    assert!(cache.is_empty());
+    assert!(cache.is_spilled()); // Index persists even when empty
+    
+    // When empty, can_unspill() returns true because size (0) <= N (3)
+    // This is technically correct - we could unspill an empty cache
+    assert!(cache.can_unspill()); // Size (0) <= N (3)
+    assert!(cache.unspill()); // Should succeed - unspill empty cache
+    assert!(!cache.is_spilled()); // Should be back to pre-spill state
+}
+
+#[test]
+fn test_unspill_preserves_index_consistency() {
+    let mut cache: TinyLru<&str, i32, 3> = TinyLru::with_capacity(4);
+    
+    // Trigger spill
+    force_spill(&mut cache);
+    assert!(cache.is_spilled());
+    verify_index_consistency(&cache);
+    
+    // Remove one element to allow unspill
+    cache.pop();
+    assert!(cache.can_unspill());
+    
+    // Unspill
+    assert!(cache.unspill());
+    assert!(!cache.is_spilled());
+    
+    // Verify all remaining elements are accessible via linear search
+    assert!(cache.contains_key(&"b"));
+    assert!(cache.contains_key(&"c"));
+    assert!(cache.contains_key(&"d"));
+    assert_eq!(cache.get(&"b"), Some(&2));
+    assert_eq!(cache.get(&"c"), Some(&3));
+    assert_eq!(cache.get(&"d"), Some(&4));
+    
+    verify_dll_structure(&cache);
+}
