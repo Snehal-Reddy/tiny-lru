@@ -44,7 +44,7 @@ where
 
     // Key → index map. Lazily allocated ONLY on first spill to avoid heap allocs pre-spill.
     // Pre-spill lookups use linear scan over the compact TinyVec.
-    index: Option<hashbrown::HashMap<K, u16>>,
+    index: Option<rustc_hash::FxHashMap<K, u16>>,
 
     // Capacity semantics (v1 cap):
     // - size and capacity are u16; maximum capacity <= 65,534 (u16::MAX - 1)
@@ -166,6 +166,7 @@ where
     }
 
     /// Get by key, promoting to MRU on hit.
+    #[inline]
     pub fn get(&mut self, key: &K) -> Option<&V> {
         if let Some(index) = self.find_key_index(key) {
             self.promote_to_mru(index);
@@ -186,6 +187,7 @@ where
     }
 
     /// Peek without promotion.
+    #[inline]
     pub fn peek(&self, key: &K) -> Option<&V> {
         self.find_key_index(key).map(|index| &self.store[index].val)
     }
@@ -344,7 +346,7 @@ where
     /// Spill to heap.
     #[cold]
     fn spill(&mut self) {
-        self.index = Some(hashbrown::HashMap::new());
+        self.index = Some(rustc_hash::FxHashMap::default());
         for i in 0..self.store.len() {
             self.index.as_mut().unwrap().insert(self.store[i].key.clone(), i as u16);
         }

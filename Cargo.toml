@@ -15,7 +15,7 @@ std = []
 
 [dependencies]
 tinyvec = { version = "1", features = ["alloc"] }
-hashbrown = { version = "0.14", default-features = true }
+rustc-hash = "1.1"
 likely_stable = "0.1"
 
 [dev-dependencies]
@@ -47,4 +47,20 @@ harness = false
 
 [[bench]]
 name = "uluru_bench"
+harness = false
+
+[[bench]]
+name = "large_n_benchmarks"
+harness = false
+
+[[bench]]
+name = "tiny_lru_large_bench"
+harness = false
+
+[[bench]]
+name = "lru_rs_large_bench"
+harness = false
+
+[[bench]]
+name = "schnellru_large_bench"
 harness = false
