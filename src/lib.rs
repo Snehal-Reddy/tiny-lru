@@ -388,52 +388,52 @@ where
     /// Promote an entry to MRU (move to tail).
     #[inline(always)]
     fn promote_to_mru(&mut self, index: usize) {
-        // Early return if already MRU or only one element
+        // Early return if already MRU or only one element.
         if self.store.len() <= 1 || index == self.tail as usize {
             return;
         }
 
         let entries: *mut [Entry<K, V>] = self.store.as_mut_slice();
-        // SAFETY: `index` is guaranteed to be in bounds (0 <= index < self.store.len()) since it
-        // comes from `find_key_index`. The raw pointer dereference is safe because `entries`
-        // is derived from `self.store.as_mut_slice()` which is a valid mutable slice.
-        let entry = unsafe { (&mut *entries).get_unchecked_mut(index) };
-        let prev = entry.prev;
-        let next = entry.next;
         let entry_index = index as u16;
 
-        // Detach from current position
-        if entry_index == self.head {
-            // Moving head to somewhere later: head becomes next
-            self.head = next;
-            if self.head != u16::MAX {
-                // SAFETY:  Since we just set `self.head = next` and `next` comes from a valid entry,
-                // `self.head` is guaranteed to be in bounds. The raw pointer dereference is safe as above.
-                unsafe { (&mut *entries).get_unchecked_mut(self.head as usize) }.prev = u16::MAX;
+        // SAFETY: `index` is guaranteed to be in bounds by the caller (`get`/`get_mut`).
+        let (prev, next) = unsafe {
+            let entry = (&*entries).get_unchecked(index);
+            (entry.prev, entry.next)
+        };
+
+        // Detach the entry by linking its neighbors to each other.
+        // SAFETY: All pointer writes are on indices that were part of a valid linked list.
+        // `next` is guaranteed to be a valid index because the entry is not the tail.
+        unsafe {
+            (&mut *entries).get_unchecked_mut(next as usize).prev = prev;
+        }
+
+        if prev != u16::MAX {
+            // The entry was not the head; update its `prev` neighbor.
+            // SAFETY: `prev` is a valid index since it's not the sentinel.
+            unsafe {
+                (&mut *entries).get_unchecked_mut(prev as usize).next = next;
             }
         } else {
-            // SAFETY: Since we're not at the head (else branch), `prev` must be a valid index
-            // < self.store.len(). The raw pointer dereference is safe as above.
-            unsafe { (&mut *entries).get_unchecked_mut(prev as usize) }.next = next;
+            // The entry was the head; the new head is its `next` neighbor.
+            self.head = next;
         }
 
-        // Update next node's prev to skip this entry (if it exists)
-        if next != u16::MAX {
-            // SAFETY: Since `next != u16::MAX`, it must be a valid index < self.store.len(). The raw
-            // pointer dereference is safe as above.
-            unsafe { (&mut *entries).get_unchecked_mut(next as usize) }.prev = prev;
-        }
-
-        // Attach at tail
+        // Attach the entry at the tail.
         let old_tail = self.tail;
-        entry.prev = old_tail;
-        entry.next = u16::MAX;
-
-        // SAFETY: `self.tail` is guaranteed to be a valid index < self.store.len() (not u16::MAX) 
-        // since we're in the promote_to_mru function and there are at least 2 elements (early return check). 
-        // The raw pointer dereference is safe as above.
-        unsafe { (&mut *entries).get_unchecked_mut( old_tail as usize) }.next = entry_index;
+        // SAFETY: `old_tail` is a valid index because the list has more than one element.
+        unsafe {
+            (&mut *entries).get_unchecked_mut(old_tail as usize).next = entry_index;
+        }
         self.tail = entry_index;
+
+        // SAFETY: `index` is guaranteed to be in bounds.
+        unsafe {
+            let entry = (&mut *entries).get_unchecked_mut(index);
+            entry.prev = old_tail;
+            entry.next = u16::MAX;
+        }
     }
 
     /// Remove a node from the doubly-linked list.
