@@ -1,8 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 //! tiny-lru: A Fast Small-then-Spill LRU cache.
-//!
-//! This is scaffolding only. All functions are intentionally unimplemented.
 
 extern crate alloc;
 
@@ -63,6 +61,7 @@ where
     V: Default,
 {
     /// Create with capacity = N.
+    #[inline]
     pub fn new() -> Self {
         assert_capacity_limit::<N>();
         
@@ -76,6 +75,7 @@ where
     }
 
     /// Create with specified capacity (must be >= N).
+    #[inline]
     pub fn with_capacity(cap: u16) -> Self {
         assert_capacity_limit::<N>();
         
@@ -92,6 +92,7 @@ where
     }
 
     /// Insert or update; promotes on hit.
+    #[inline]
     pub fn push(&mut self, key: K, value: V) {
         // If key exists: update value and promote to MRU
         if let Some(index) = self.find_key_index(&key) {
@@ -113,6 +114,7 @@ where
     }
 
     /// Pop and return the LRU entry.
+    #[inline]
     pub fn pop(&mut self) -> Option<(K, V)> {
         if self.is_empty() {
             return None;
@@ -177,6 +179,7 @@ where
     }
 
     /// Get mutable by key, promoting to MRU on hit.
+    #[inline]
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         if let Some(index) = self.find_key_index(key) {
             self.promote_to_mru(index);
@@ -193,6 +196,7 @@ where
     }
 
     /// Remove by key and return owned pair.
+    #[inline]
     pub fn remove(&mut self, key: &K) -> Option<(K, V)> {
         // Find the key index
         let index = self.find_key_index(key)?;
@@ -247,6 +251,7 @@ where
     }
 
     /// Clear all entries.
+    #[inline]
     pub fn clear(&mut self) {
         // Clear the store efficiently
         self.store.clear();
@@ -260,6 +265,7 @@ where
     }
 
     /// Adjust capacity. Requires new_cap > size and new_cap >= N.
+    #[inline]
     pub fn set_capacity(&mut self, new_cap: u16) {
         // Validate requirements
         assert!(new_cap > self.store.len() as u16, "new_cap must be > current size");
@@ -283,27 +289,32 @@ where
     }
 
     /// Current capacity.
+    #[inline]
     pub fn capacity(&self) -> u16 {
         self.capacity
     }
 
     /// Contains key.
+    #[inline]
     pub fn contains_key(&self, key: &K) -> bool {
         self.find_key_index(key).is_some()
     }
 
     /// Check if the cache is currently spilled to heap.
+    #[inline]
     pub fn is_spilled(&self) -> bool {
         self.index.is_some()
     }
 
     /// Check if unspill is currently possible.
+    #[inline]
     pub fn can_unspill(&self) -> bool {
         self.is_spilled() && self.store.len() <= N
     }
 
     /// Attempt to unspill from heap back to inline storage.
     /// Returns true if unspill was successful, false if not possible.
+    #[inline]
     pub fn unspill(&mut self) -> bool {
         if !self.can_unspill() {
             return false;
