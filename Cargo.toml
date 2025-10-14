@@ -15,11 +15,11 @@ std = []
 
 [dependencies]
 tinyvec = { version = "1", features = ["alloc"] }
-rustc-hash = "1.1"
+rustc-hash = "2.1.1"
 likely_stable = "0.1"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.7"
 lru = { path = "./lru-rs" }
 const-lru = { path = "./const-lru" }
 schnellru = { path = "./schnellru" }

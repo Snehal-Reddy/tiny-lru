@@ -49,7 +49,7 @@ Performance comparison showing relative speed (higher numbers = slower). tiny-lr
 ### Benchmark Details
 
 - **Hardware**: Core Ultra 7 265KF, 32 GB DDR5-6000
-- **Compiler/tooling**: Rust edition `2024`; Criterion `0.5` (compiler version not pinned in repo)
+- **Compiler/tooling**: Rust edition `2024`; Criterion `0.7` (compiler version not pinned in repo)
 - **How to run**: `cargo bench` (benches declared in `Cargo.toml` under `[[bench]]`)
 
 ## Use Cases

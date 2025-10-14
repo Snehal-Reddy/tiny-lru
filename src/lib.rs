@@ -268,7 +268,7 @@ where
     #[inline]
     pub fn set_capacity(&mut self, new_cap: u16) {
         // Validate requirements
-        assert!(new_cap >= self.store.len() as u16, "new_cap must be >= current size");
+        assert!(new_cap > self.store.len() as u16, "new_cap must be > current size");
         assert!(new_cap >= N as u16, "new_cap must be >= N");
         
         // Pre-spill: just update the capacity field
