@@ -4,7 +4,7 @@ A Fast Small-then-Spill LRU cache combining the raw speed of stack-based LRUs wi
 
 ## Design Philosophy
 
-For very small working sets, entries are stored inline in a fixed-capacity array, giving fast, allocation-free lookups and updates with excellent cache locality. Once the inline capacity is exceeded, it transparently "spills" into a heap-backed LRU (hash map + linked list), ensuring O(1) operations at larger scales.
+For very small working sets, entries are **stored inline on the stack** in a fixed-capacity array, giving fast, allocation-free lookups and updates with excellent cache locality. Once the inline capacity is exceeded, it transparently "spills" into a **heap-backed LRU (hash map + linked list)**, ensuring O(1) operations at larger scales.
 
 The design goal is zero compromise on micro-performance for small caches while still supporting larger workloads without falling off a performance cliff. In short: a tinyvec-style hybrid LRU optimized for both tiny hot paths (embedded, HFT, real-time) and unbounded dynamic growth when needed.
 
