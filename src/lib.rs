@@ -45,8 +45,8 @@ where
     index: Option<rustc_hash::FxHashMap<K, u16>>,
 
     // Capacity semantics (v1 cap):
-    // - size and capacity are u16; maximum capacity <= 65,534 (u16::MAX - 1)
-    // - set_capacity requires new_cap > size and new_cap >= N
+    // - store.len() and capacity are u16; maximum capacity <= 65,534 (u16::MAX - 1)
+    // - set_capacity requires new_cap > store.len() and new_cap >= N
     capacity: u16,
 }
 
@@ -268,7 +268,7 @@ where
     #[inline]
     pub fn set_capacity(&mut self, new_cap: u16) {
         // Validate requirements
-        assert!(new_cap > self.store.len() as u16, "new_cap must be > current size");
+        assert!(new_cap >= self.store.len() as u16, "new_cap must be >= current size");
         assert!(new_cap >= N as u16, "new_cap must be >= N");
         
         // Pre-spill: just update the capacity field
