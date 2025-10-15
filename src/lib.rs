@@ -12,19 +12,40 @@ use likely_stable::unlikely;
 const MAX_CAPACITY: u16 = u16::MAX - 1;
 
 /// Intrusive node stored in the TinyVec/heap storage.
+///
+/// Contains the key-value pair and doubly-linked list pointers for LRU ordering.
 #[derive(Default, Clone)]
 pub struct Entry<K, V> 
 where
     K: Default + Clone,
     V: Default,
 {
+    /// The cache key
     pub key: K,
+    /// The cached value
     pub val: V,
+    /// Next entry index in LRU order (u16::MAX if tail)
     pub next: u16,
+    /// Previous entry index in LRU order (u16::MAX if head)
     pub prev: u16,
 }
 
 /// LRU cache with inline-then-spill storage.
+///
+/// For small working sets (≤ N), entries are stored inline on the stack for maximum performance.
+/// Once capacity exceeds N, it transparently spills to heap-backed storage with O(1) operations.
+///
+/// # Example
+/// ```
+/// use tiny_lru::TinyLru;
+///
+/// let mut cache = TinyLru::<i32, &str, 4>::new();
+/// cache.push(1, "value");
+/// cache.push(2, "another");
+/// 
+/// assert_eq!(cache.get(&1), Some(&"value"));
+/// assert_eq!(cache.len(), 2);
+/// ```
 #[derive(Clone)]
 pub struct TinyLru<K, V, const N: usize>
 where
@@ -60,7 +81,15 @@ where
     K: Eq + Hash + Default + Clone,
     V: Default,
 {
-    /// Create with capacity = N.
+    /// Create a new cache with capacity = N.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let cache = TinyLru::<i32, &str, 8>::new();
+    /// assert_eq!(cache.capacity(), 8);
+    /// ```
     #[inline]
     pub fn new() -> Self {
         assert_capacity_limit::<N>();
@@ -74,7 +103,18 @@ where
         }
     }
 
-    /// Create with specified capacity (must be >= N).
+    /// Create a new cache with specified capacity (must be >= N).
+    ///
+    /// # Panics
+    /// Panics if `cap < N`.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let cache = TinyLru::<i32, &str, 4>::with_capacity(16);
+    /// assert_eq!(cache.capacity(), 16);
+    /// ```
     #[inline]
     pub fn with_capacity(cap: u16) -> Self {
         assert_capacity_limit::<N>();
@@ -91,7 +131,22 @@ where
         }
     }
 
-    /// Insert or update; promotes on hit.
+    /// Insert or update a key-value pair, promoting to MRU on hit.
+    ///
+    /// If the key already exists, updates the value and promotes to most recently used.
+    /// If the cache is at capacity, removes the least recently used entry first.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 2>::new();
+    /// cache.push(1, "first".to_string());
+    /// cache.push(2, "second".to_string());
+    /// cache.push(1, "updated".to_string()); // Updates existing key
+    /// 
+    /// assert_eq!(cache.get(&1), Some(&"updated".to_string()));
+    /// ```
     #[inline]
     pub fn push(&mut self, key: K, value: V) {
         // If key exists: update value and promote to MRU
@@ -113,7 +168,22 @@ where
         self.insert(key, value);
     }
 
-    /// Pop and return the LRU entry.
+    /// Remove and return the least recently used entry.
+    ///
+    /// Returns `None` if the cache is empty.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 2>::new();
+    /// cache.push(1, "first".to_string());
+    /// cache.push(2, "second".to_string());
+    /// 
+    /// let (key, value) = cache.pop().unwrap();
+    /// assert_eq!(key, 1); // LRU entry
+    /// assert_eq!(value, "first");
+    /// ```
     #[inline]
     pub fn pop(&mut self) -> Option<(K, V)> {
         if self.is_empty() {
@@ -167,7 +237,20 @@ where
         Some((key, value))
     }
 
-    /// Get by key, promoting to MRU on hit.
+    /// Get a value by key, promoting to MRU on hit.
+    ///
+    /// Returns `None` if the key is not found.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 2>::new();
+    /// cache.push(1, "value".to_string());
+    /// 
+    /// assert_eq!(cache.get(&1), Some(&"value".to_string()));
+    /// assert_eq!(cache.get(&2), None);
+    /// ```
     #[inline]
     pub fn get(&mut self, key: &K) -> Option<&V> {
         if let Some(index) = self.find_key_index(key) {
@@ -178,7 +261,22 @@ where
         }
     }
 
-    /// Get mutable by key, promoting to MRU on hit.
+    /// Get a mutable reference by key, promoting to MRU on hit.
+    ///
+    /// Returns `None` if the key is not found.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 2>::new();
+    /// cache.push(1, "value".to_string());
+    /// 
+    /// if let Some(val) = cache.get_mut(&1) {
+    ///     val.push_str(" updated");
+    /// }
+    /// assert_eq!(cache.get(&1), Some(&"value updated".to_string()));
+    /// ```
     #[inline]
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         if let Some(index) = self.find_key_index(key) {
@@ -189,13 +287,44 @@ where
         }
     }
 
-    /// Peek without promotion.
+    /// Peek at a value by key without promoting to MRU.
+    ///
+    /// Returns `None` if the key is not found. Unlike `get()`, this does not
+    /// affect the LRU ordering.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 2>::new();
+    /// cache.push(1, "first".to_string());
+    /// cache.push(2, "second".to_string());
+    /// 
+    /// // Peek doesn't change LRU order
+    /// assert_eq!(cache.peek(&1), Some(&"first".to_string()));
+    /// cache.pop(); // Still removes key 1 (LRU)
+    /// ```
     #[inline]
     pub fn peek(&self, key: &K) -> Option<&V> {
         self.find_key_index(key).map(|index| &self.store[index].val)
     }
 
-    /// Remove by key and return owned pair.
+    /// Remove a key-value pair and return the owned values.
+    ///
+    /// Returns `None` if the key is not found.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 2>::new();
+    /// cache.push(1, "value".to_string());
+    /// 
+    /// let (key, value) = cache.remove(&1).unwrap();
+    /// assert_eq!(key, 1);
+    /// assert_eq!(value, "value");
+    /// assert!(cache.is_empty());
+    /// ```
     #[inline]
     pub fn remove(&mut self, key: &K) -> Option<(K, V)> {
         // Find the key index
@@ -250,7 +379,20 @@ where
         Some((key, value))
     }
 
-    /// Clear all entries.
+    /// Clear all entries from the cache.
+    ///
+    /// Resets the cache to its initial state, including returning to pre-spill
+    /// mode if it was previously spilled to heap.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 2>::new();
+    /// cache.push(1, "value".to_string());
+    /// cache.clear();
+    /// assert!(cache.is_empty());
+    /// ```
     #[inline]
     pub fn clear(&mut self) {
         // Clear the store efficiently
@@ -264,7 +406,19 @@ where
         self.index = None;
     }
 
-    /// Adjust capacity. Requires new_cap > size and new_cap >= N.
+    /// Adjust the cache capacity.
+    ///
+    /// # Panics
+    /// Panics if `new_cap <= current_size` or `new_cap < N`.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 4>::new();
+    /// cache.set_capacity(16);
+    /// assert_eq!(cache.capacity(), 16);
+    /// ```
     #[inline]
     pub fn set_capacity(&mut self, new_cap: u16) {
         // Validate requirements
@@ -276,44 +430,129 @@ where
         self.capacity = new_cap;
     }
 
-    /// Current number of items.
+    /// Returns the current number of items in the cache.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 4>::new();
+    /// assert_eq!(cache.len(), 0);
+    /// cache.push(1, "value".to_string());
+    /// assert_eq!(cache.len(), 1);
+    /// ```
     #[inline]
     pub fn len(&self) -> u16 {
         self.store.len() as u16
     }
 
-    /// Whether the cache is empty.
+    /// Returns `true` if the cache contains no items.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 4>::new();
+    /// assert!(cache.is_empty());
+    /// cache.push(1, "value".to_string());
+    /// assert!(!cache.is_empty());
+    /// ```
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.store.is_empty()
     }
 
-    /// Current capacity.
+    /// Returns the current capacity of the cache.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let cache = TinyLru::<i32, String, 8>::new();
+    /// assert_eq!(cache.capacity(), 8);
+    /// ```
     #[inline]
     pub fn capacity(&self) -> u16 {
         self.capacity
     }
 
-    /// Contains key.
+    /// Returns `true` if the cache contains the specified key.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 4>::new();
+    /// cache.push(1, "value".to_string());
+    /// 
+    /// assert!(cache.contains_key(&1));
+    /// assert!(!cache.contains_key(&2));
+    /// ```
     #[inline]
     pub fn contains_key(&self, key: &K) -> bool {
         self.find_key_index(key).is_some()
     }
 
-    /// Check if the cache is currently spilled to heap.
+    /// Returns `true` if the cache has spilled to heap-backed storage.
+    ///
+    /// This happens when the cache size exceeds the inline capacity N.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 2>::with_capacity(4);
+    /// assert!(!cache.is_spilled());
+    /// 
+    /// cache.push(1, "a".to_string());
+    /// cache.push(2, "b".to_string());
+    /// cache.push(3, "c".to_string()); // Triggers spill
+    /// assert!(cache.is_spilled());
+    /// ```
     #[inline]
     pub fn is_spilled(&self) -> bool {
         self.index.is_some()
     }
 
-    /// Check if unspill is currently possible.
+    /// Returns `true` if the cache can be unspilled back to inline storage.
+    ///
+    /// This is possible when the cache is spilled but the current size ≤ N.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 2>::with_capacity(4);
+    /// cache.push(1, "a".to_string());
+    /// cache.push(2, "b".to_string());
+    /// cache.push(3, "c".to_string()); // Spills
+    /// cache.pop(); // Size back to 2
+    /// 
+    /// assert!(cache.can_unspill());
+    /// ```
     #[inline]
     pub fn can_unspill(&self) -> bool {
         self.is_spilled() && self.store.len() <= N
     }
 
     /// Attempt to unspill from heap back to inline storage.
-    /// Returns true if unspill was successful, false if not possible.
+    ///
+    /// Returns `true` if unspill was successful, `false` if not possible.
+    /// This can free heap memory when the cache size drops below N.
+    ///
+    /// # Example
+    /// ```
+    /// use tiny_lru::TinyLru;
+    ///
+    /// let mut cache = TinyLru::<i32, String, 2>::with_capacity(4);
+    /// cache.push(1, "a".to_string());
+    /// cache.push(2, "b".to_string());
+    /// cache.push(3, "c".to_string()); // Spills
+    /// cache.pop(); // Size back to 2
+    /// 
+    /// assert!(cache.unspill()); // Returns to inline storage
+    /// assert!(!cache.is_spilled());
+    /// ```
     #[inline]
     pub fn unspill(&mut self) -> bool {
         if !self.can_unspill() {
