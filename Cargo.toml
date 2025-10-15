@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["Snehal Koukuntla <snehalreddyk@gmail.com>"]
 description = "A Fast Small-then-Spill LRU cache"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourusername/tiny-lru"
+repository = "https://github.com/Snehal-Reddy/tiny-lru"
 keywords = ["lru", "cache", "performance", "embedded", "hft"]
 categories = ["data-structures", "caching"]
 
